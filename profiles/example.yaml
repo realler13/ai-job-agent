@@ -1,0 +1,410 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Example candidate profile — FICTIONAL.
+#
+# Maya Okonkwo, her employers and every number below are invented. This file
+# is what the agent knows about who is job hunting: identity, search area,
+# keywords, verified metrics and the candidate summary all come from here.
+#
+#   cp profiles/example.yaml profiles/profile.yaml   # gitignored
+#   $EDITOR profiles/profile.yaml
+#
+# Sections:
+#   candidate            identity and pronouns (document headers come from env vars)
+#   paths                where your resume / base CV / notes live
+#   search               locations, keywords, exclusions, staleness
+#   metrics_text         the ONLY numbers generators may use
+#   rules                the judgement policy, in plain English
+#   application_answers  boilerplate for application forms
+#   domains              one base-CV variant per keyword category
+#
+# How `rules` is used: `candidate_summary` is injected into the grading
+# prompts. The other entries (target_roles, seniority_rule, craft_rule,
+# industry_rule, reject_rules) are available to prompts as profile markers;
+# the shipped cascade prompts (config.py, gpt_filter.py) spell the same policy
+# out for a production-role search, so keep the two in step when you change
+# one.
+# ─────────────────────────────────────────────────────────────────────────────
+
+candidate:
+  name: Maya Okonkwo
+  first_name: Maya
+  last_name: Okonkwo
+  headline: hands-on mid-level video producer
+  years_experience: 8+ years
+  pronouns:
+    subject: she
+    object: her
+    possessive: her
+  email: maya.okonkwo@example.com
+  phone: 555-0142
+  website: ''
+  note: Fictional example. Copy this file to profiles/profile.yaml and replace everything
+    under `candidate`, `metrics_text` and `rules` with your own. profiles/profile.yaml is
+    gitignored.
+  network_label: candidate
+paths:
+  resume: profile/resume.pdf
+  base_cv: profile/base_cv.docx
+  base_cv_dir: profile
+  transcript: profile/interview_notes.md
+  source_bank: profile/career_source_bank.md
+search:
+  # primary_metro_terms -> the classifier's top class, secondary_metro_terms ->
+  # its capped class (on-site there is shown as "worth a look" at most).
+  # The "rest of the home state" branch of config.classify_location is written
+  # for the market the tool was first tuned for; state_code / state_name are
+  # informational until that branch reads them.
+  locations:
+    home: Seattle, WA
+    primary_metro_label: Seattle metro
+    primary_metro_terms:
+    - seattle
+    - bellevue
+    - redmond
+    - kirkland
+    - tacoma
+    - everett
+    - renton
+    - bothell
+    - puget sound
+    secondary_metro_label: Portland metro
+    secondary_metro_terms:
+    - portland
+    - beaverton
+    - hillsboro
+    - vancouver, wa
+    - gresham
+    allowed:
+    - seattle
+    - bellevue
+    - redmond
+    - kirkland
+    - tacoma
+    - washington
+    - wa
+    - portland
+    - oregon
+    - or
+    - remote
+    - hybrid
+    state_code: wa
+    state_name: washington
+    secondary_metro_abbrev: ''
+  comp_floor_yearly: 50000
+  comp_floor_secondary_metro: 100000
+  comp_floor_note: A role whose pay CEILING falls under the floor is dropped. On-site roles
+    in the secondary metro must clear a higher floor. Unstated pay is never penalised.
+    These two values mirror the tool defaults in comp_utils.py, which holds the floors
+    that are actually applied.
+  # Postings older than this are dropped before grading (the Review list shows
+  # nothing older than 7 days anyway).
+  stale_posting_days: 7
+  # Search titles, grouped by the CV variant they route to (see `domains`).
+  # A short starter list: every title is a search query on several job boards,
+  # so add your own a few at a time.
+  keywords_by_category:
+    producer_core:
+    - Producer
+    - Senior Producer
+    - Associate Producer
+    - Video Producer
+    - Senior Video Producer
+    - Content Producer
+    - Branded Content Producer
+    - Documentary Producer
+    - Series Producer
+    - Creative Producer
+    - Line Producer
+    - Post Producer
+    live_and_experiential:
+    - Broadcast Producer
+    - Studio Producer
+    production_ops_and_management:
+    - Production Manager
+    - Post-Production Manager
+    - Content Production Manager
+    - Studio Manager
+    project_and_program_management:
+    - Creative Project Manager
+    - Video Project Manager
+    - Content Program Manager
+  exclude_phrases:
+  - intern
+  - internship
+  - apprentice
+  - sales
+  - sdr
+  - bdr
+  - account executive
+  - engineer
+  - developer
+  - software
+  - nurse
+  - driver
+  - technician
+  - instructional designer
+  - learning designer
+  - educational technologist
+  - adjunct
+  - faculty
+  - teacher
+  - professor
+  - video editor
+  - camera operator
+  - community manager
+  - social media coordinator
+  - social media specialist
+  - influencer coordinator
+  - pr coordinator
+  - technical program manager
+  - technical project manager
+  - engineering program manager
+  - engineering project manager
+  - it project manager
+  - it program manager
+  - scrum master
+  - agile coach
+  - release manager
+  - site reliability
+  - devops
+  - infrastructure
+  - data scientist
+  - data analyst
+  - machine learning
+  - product manager
+  negative_keywords_industrial:
+  - manufacturing
+  - plant
+  - factory
+  - warehouse
+  - construction
+  - foreman
+  - assembly line
+  - production line
+  - cgmp
+  - gmp
+  - pharma
+  - chemical
+  - semiconductor
+  - mechanical engineer
+  - electrical engineer
+  - civil engineer
+  - civil engineering
+  - mechanical engineering
+  - electrical engineering
+  - hvac
+  - industrial
+  - oil
+  - gas
+  negative_keywords_tech:
+  - kubernetes
+  - terraform
+  - ci/cd
+  - saas
+  - microservices
+  - sql
+  - python
+  - java
+  - typescript
+  - react
+  - node.js
+  - aws
+  - azure
+  - gcp
+  - docker
+metrics_text: 'VERIFIED METRICS (use only these numbers — never invent others):
+
+  - 8+ years producing video and branded content (CANONICAL years figure — always state "8+
+  years"; never a larger number)
+
+  - EMPLOYMENT STATUS RULE: Northgate Media is a PAST role (Apr 2021 – Aug 2025). Use past
+  tense for it; never "currently".
+
+
+  Northgate Media (Senior Producer, Apr 2021 – Aug 2025, documentary & branded series):
+
+  - 120+ episodes delivered across three series
+
+  - Post schedule cut from 6 to 4 weeks per episode
+
+  - 20+ freelance crew and post contributors booked per season (editors, sound, colourists)
+
+  - $250K annual production budget owned, reconciled monthly
+
+
+  Cascade Public Broadcasting (Producer, Aug 2018 – Mar 2021):
+
+  - 3 weekly studio programmes produced end to end
+
+  - Two programmes renewed for a third season
+
+  - 9-person crews on location shoots; full vendor and location negotiation
+
+
+  Freelance (Producer / Production Manager, 2016 – 2018):
+
+  - 30+ commercial and non-profit shoots
+
+  - Post-production supervision for a 6-part docuseries
+
+
+  Tooling: Final Cut Pro, DaVinci Resolve, Asana, Airtable, Pro Tools.'
+rules:
+  candidate_summary: >-
+    The candidate is a hands-on PRODUCER — a mid-level individual contributor in video,
+    documentary, branded content and studio broadcast. She plans, budgets, schedules, books
+    crews and vendors, and delivers finished productions. She is based in Seattle and works
+    on-site in the Seattle metro or remote for US-based employers; on-site in the Portland
+    metro is acceptable but a weaker option. She has 8+ years of production experience and
+    targets individual-contributor roles with no direct reports.
+  target_roles: |-
+    STRONG TARGET (top tier): mid-level individual-contributor production —
+    Producer, Senior Producer (IC), Associate Producer, Lead Producer, Line
+    Producer, hands-on Production Manager (owning schedules/budgets/vendors,
+    not people). Associate Producer is a legitimate target level, NOT junior.
+
+    BELOW-LEVEL WALL: entry-level roles (coordinator-level, assistant, trainee,
+    or a posting whose experience requirement tops out at 0-2 years) sit below
+    the target level → REJECT. A title that co-names a producer role is judged
+    on the description.
+  seniority_rule: |-
+    PEOPLE-MANAGEMENT TEST (run FIRST): scan the DESCRIPTION, not the title, for
+    explicit direct-report language — "manage a team of", "hire", "headcount",
+    "direct reports", "performance reviews". If the role's CORE is people
+    management, REJECT: the target level is individual-contributor with no
+    direct reports, however production-relevant the title looks. An org-level
+    executive title (VP / SVP / Chief / Head of <function>) is people
+    management by definition → also REJECT.
+
+    The hands-on exception (a REAL match, not a reject) holds only when the role
+    owns SCHEDULES / BUDGETS / VENDORS / DELIVERABLES with NO team to manage —
+    "collaborate with the team" is NOT people management.
+
+    LEADERSHIP-TITLE CAP: an over-leveled or ambiguous leadership TITLE
+    (Principal / Lead / Executive Producer) with NO direct-report evidence is AT
+    MOST the lower tier — keep it visible, it may be an inflated title on a
+    hands-on job; do NOT reject on the title alone.
+
+    DIRECTOR DISAMBIGUATION: "Director" has three readings, and your reasoning
+    must NAME which one the JD shows. (a) ORG-SENIORITY Director (owns strategy,
+    teams, departmental budgets) → REJECT. (b) CRAFT Director (film/video
+    director, art director, creative director — directs the creative work itself)
+    → REJECT. (c) INFLATED TITLE on hands-on IC work, evidenced by
+    schedules/budgets/vendors duties → lower tier. Readings (a) and (b) are
+    REJECT, never "capped": the leadership-title cap does NOT apply to Director
+    titles, and naming (a) or (b) and then keeping the role is the exact
+    contradiction the verdict-binding rule forbids. A Director title with an EMPTY
+    or stub description has no evidence for (c) and is a REJECT — the general
+    "insufficient description → ambiguous, keep visible" branch does not apply to
+    Director titles.
+  craft_rule: |-
+    CRAFT-SPECIALIST TEST: REJECT when the core deliverable is personally
+    executing a craft (editing, shooting, design, sound) instead of producing:
+      - Motion Designer / Animator / 3D Artist
+      - Videographer / Camera Operator
+      - Video Editor as the primary job
+      - Graphic / Visual Designer / Illustrator
+      - Sound or Audio Engineer / Mixer
+      - Physical event labour — stagehand, set construction, fabrication
+    The creative-craft LEADERSHIP ladder (Creative Director, Associate Creative
+    Director, Art Director, Design Director) is a different profession → REJECT.
+
+    HYBRID EXCEPTION (EVIDENCE-GATED): hybrid status requires the DESCRIPTION to
+    show real coordination duties — schedules, budgets, vendors, crew booking — as
+    a SUBSTANTIAL half. A slash-title or the bare word "producer" is NOT evidence;
+    if the day-to-day is operating the craft, it is a craft REJECT.
+  industry_rule: |-
+    PREFERRED INDUSTRIES: media, entertainment, streaming, gaming, the creator
+    economy, non-profit and public media, and in-house brand studios.
+
+    MARKETING-EVENTS WALL: corporate-marketing event roles (field marketing,
+    tradeshows, lead-generation events) → REJECT unless the description shows
+    produced-show duties. An events-sounding title does NOT rescue these: only
+    produced-show duties do (run-of-show, staging, AV/broadcast production,
+    filming, editorial output).
+
+    GOVERNMENT / DEFENSE WALL: roles supporting government, defense or military
+    programmes → REJECT even when the function reads as event or production
+    coordination — a different market from media production.
+  reject_rules: |-
+    SOCIAL-MEDIA / GROWTH TRAP: REJECT if the core is community management,
+    posting schedules, analytics/growth hacking, or copywriting dressed up as
+    "Content Strategist". ACCEPT producing content (video, audio, broadcast),
+    production ops, budgets and schedules, creative operations, studio
+    operations, media program/project management, or post-production.
+
+    TECH-PM TRAP: this search targets production roles; engineering and software
+    work is outside the target profile. REJECT Technical Program/Project Manager
+    roles with engineering oversight, anything requiring AWS / Kubernetes / CI-CD /
+    SQL / Python / microservices, and "Product Manager" roles (a different career
+    track). ACCEPT Project/Program Manager ONLY in media, entertainment, creative
+    or content-production contexts.
+
+    BUSINESS CAP: account / client / partner management or revenue ownership is AT
+    MOST the lower tier; REJECT outright when there is no production component.
+
+    ALSO REJECT: interns, unpaid or volunteer roles, 0-1-year-experience-only
+    postings, one-person-band videographer roles, video-GAME development producers
+    (shipping the game itself), music producers (recording artists), and
+    insurance/financial "producers".
+
+    OVERQUALIFIED EXCEPTION: accept junior titles at recognisable organisations
+    (major studios, streamers, public broadcasters, leading tech firms, well-known
+    universities) when the domain matches — mark these "overqualified but
+    strategic fit". This exception NEVER applies to coordinator-level, assistant,
+    trainee or 0-2-year roles: those are REJECT under the BELOW-LEVEL WALL.
+
+    VERDICT-BINDING (hard override, applies to every rule above): your verdict
+    MUST follow your own reasoning. If your analysis identifies ANY enumerated
+    reject condition, the verdict IS reject. Do NOT soften a disqualifier you
+    yourself named into the lower tier. The lower tier exists for exactly two
+    cases: a genuinely adjacent role with a SOFT gap, and a genuinely ambiguous
+    description. Writing "outside the candidate's domain" or "not
+    production-focused" and then keeping the role is a contradiction — resolve it
+    as a reject.
+application_answers:
+  first_name: Maya
+  last_name: Okonkwo
+  city: Seattle
+  state: Washington
+  country: United States
+  # Placeholder values — write your own answers in profiles/profile.yaml.
+  heard_about: Job board
+  previously_worked: 'No'
+  authorized_to_work: 'Yes'
+  visa_sponsorship: 'No'
+  gender: Decline to answer
+  race_ethnicity: Decline to answer
+  veteran_status: Decline to answer
+  disability: Decline to answer
+# One base-CV variant per domain. The keys match what the code and
+# scripts/create_base_cvs.py know; a domain with no keywords above is simply
+# never routed to until you add titles for it.
+domains:
+  producer_core:
+    cv: base_cv_producer_core.docx
+    description: general video/content/media production
+  live_and_experiential:
+    cv: base_cv_live_experiential.docx
+    description: live events, broadcast, and experiential production — on-site execution,
+      venue and vendor logistics, and running crews on location for shows, live tapings,
+      and public events
+  production_ops_and_management:
+    cv: base_cv_production_ops.docx
+    description: production operations, workflow design, and studio management
+  project_and_program_management:
+    cv: base_cv_project_program.docx
+    description: cross-functional program/project management in creative industries
+  podcast_and_audio:
+    cv: base_cv_podcast_audio.docx
+    description: podcast and audio content production
+  youtube_and_creators:
+    cv: base_cv_youtube_creators.docx
+    description: YouTube channel management, creator partnerships, and platform growth
+  games_production:
+    cv: base_cv_games_production.docx
+    description: game production, sprint-based pipelines, and shipping interactive products
+  production_admin:
+    cv: base_cv_production_admin.docx
+    description: production administration, vendor operations, scheduling, asset management,
+      and cross-functional logistics in entertainment and media environments

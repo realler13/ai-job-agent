@@ -1,0 +1,4 @@
+# LangFuse secrets — never commit. Paths are relative to THIS directory:
+# repo-root-relative patterns in a nested .gitignore silently match nothing.
+secrets.compose
+langfuse-keys.conf

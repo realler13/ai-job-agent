@@ -1,0 +1,64 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environment files (API keys). env.example is the committed template.
+.env
+.env.*
+*.env
+
+# Candidate data — yours, never committed.
+profiles/profile.yaml
+profiles/*.local.yaml
+profile/
+resume*.pdf
+base_cv.docx
+base_cv_*.docx
+~$*.docx
+candidate_profile.txt
+base-cv-variants*.md
+career_source_bank*.md
+interview_notes*.md
+# B2 bullet pool: CV bullets built by scripts/build_cv_pool.py + local overrides
+cv_pool.json
+cv_pool_overrides.json
+
+# Database (SQLite, WAL mode)
+job_search_data.db
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Generated output
+results/
+cv/
+cl/
+logs/
+data/
+backups/
+screenshots/
+*.jsonl
+
+# Secrets and credentials
+secrets/
+token.json
+credentials.json
+
+# Frontend
+node_modules/
+web/.next/
+web/out/
+*.tsbuildinfo
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+.playwright-mcp/
+
+# Local archives
+archive/

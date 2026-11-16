@@ -1,0 +1,18 @@
+<!-- Low-resource ClickHouse overrides for a small single-user LangFuse:
+     removes the system-log tables and shrinks the caches. Only these two
+     kinds of change: pool-size/thread knobs made 25.12 exit 36 at startup.
+     Mounted by docker-compose.yml into config.d/. -->
+<clickhouse>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <trace_log remove="1"/>
+    <query_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <part_log remove="1"/>
+    <text_log remove="1"/>
+    <session_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <mark_cache_size>268435456</mark_cache_size>
+    <uncompressed_cache_size>134217728</uncompressed_cache_size>
+</clickhouse>
