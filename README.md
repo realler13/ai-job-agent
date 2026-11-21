@@ -198,10 +198,22 @@ See [docs/CONFIGURING.md](docs/CONFIGURING.md) for the field-by-field guide.
 
 ## Tests
 
-The test suite is being ported with fictional fixtures and is not part of
-this first publish. The private suite it comes from was written against one
-person's real data; each test moves over once its fixtures are rebuilt around
-the example persona.
+About 2,300 tests, all written around a fictional candidate: Marisol
+Vantongeren, a video producer in Seattle (`tests/fixtures/test_profile.yaml`).
+`tests/conftest.py` pins that profile before anything else loads, switches
+tracing off and nulls the Anthropic client, so a model call a test forgot to
+mock returns nothing instead of making a paid request. Run the suite from a
+scratch directory, so files the tests write stay out of the tree:
+
+```bash
+REPO="$PWD"                      # start in the repository root
+mkdir -p /tmp/job-agent-tests && cd /tmp/job-agent-tests
+PYTHONPATH="$REPO/src" python -m pytest --rootdir="$REPO" -p no:cacheprovider -q "$REPO/tests"
+```
+
+[tests/fixtures/README.md](tests/fixtures/README.md) describes the persona
+and the one rule for new test data: fictional people and obviously fictional
+companies only.
 
 ## Cost and honesty
 
