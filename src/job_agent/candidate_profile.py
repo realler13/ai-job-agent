@@ -175,3 +175,129 @@ def metrics_text() -> str:
         where = " · ".join(p for p in (employer, period) if p)
         lines.append(f"- {value} — {context}" + (f" ({where})" if where else ""))
     return "\n".join(lines)
+
+
+def apple_target_band(profile: Profile | None = None) -> tuple[int, int] | None:
+    """(low, high) Apple IC level numbers the candidate targets, or None.
+
+    Read from ``search.apple_target_band: {low: 3, high: 4}``. Apple publishes
+    the level on its own job pages, so this is the one seniority rule the
+    cascade applies in code (cascade_filter.apple_level_verdict). There is no
+    default band: a profile that leaves the key out gets None, and the Apple
+    level rule is off. A malformed band fails loudly, because a wrong band
+    silently rejects or caps every Apple posting.
+    """
+    search = (profile or PROFILE).get("search") or {}
+    band = search.get("apple_target_band")
+    if band is None:
+        return None
+    source = (profile or PROFILE).source
+    try:
+        low, high = int(band["low"]), int(band["high"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            f"search.apple_target_band in {source} must be a mapping with whole-number "
+            f"'low' and 'high' level numbers, e.g. {{low: 3, high: 4}}."
+        ) from None
+    if not 1 <= low <= high <= 9:
+        raise ValueError(
+            f"search.apple_target_band in {source} must satisfy 1 <= low <= high <= 9 "
+            f"(got low={low}, high={high})."
+        )
+    return low, high
+
+
+def letter_template(profile: Profile | None = None) -> dict:
+    """The profile's ``letter_template`` section, checked and as plain values.
+
+    The templated cover letter (docs_builder.templated_letter) is the fallback
+    that ships when the letter check is unavailable, so its sentences must be
+    the candidate's own verified facts, never text written for someone else:
+
+        letter_template:
+          opening: one sentence on what the candidate does (no numbers needed)
+          proofs: {name: one past-tense sentence restating metrics_text}
+          proofs_by_domain: {domain: [2-3 proof names, strongest first]}
+          fallback_proof: optional number-free sentence
+
+    Returns ``{"opening": str, "proofs": {name: str}, "proofs_by_domain":
+    {domain: (names...)}, "fallback_proof": str}``; every part is empty when
+    the profile has no section (docs_builder then writes a short generic
+    letter). A domain list naming a proof that does not exist fails loudly.
+    """
+    section = (profile or PROFILE).get("letter_template") or {}
+    source = (profile or PROFILE).source
+
+    def text(value) -> str:
+        return " ".join(str(value).split()) if value is not None else ""
+
+    proofs = {str(name): text(sentence)
+              for name, sentence in (section.get("proofs") or {}).items() if text(sentence)}
+    by_domain = {}
+    for domain, names in (section.get("proofs_by_domain") or {}).items():
+        names = (names,) if isinstance(names, str) else tuple(str(n) for n in (names or ()))
+        unknown = [n for n in names if n not in proofs]
+        if unknown:
+            raise ValueError(
+                f"letter_template.proofs_by_domain.{domain} in {source} names "
+                f"{', '.join(unknown)}, which letter_template.proofs does not define."
+            )
+        by_domain[str(domain)] = names
+    return {
+        "opening": text(section.get("opening")),
+        "proofs": proofs,
+        "proofs_by_domain": by_domain,
+        "fallback_proof": text(section.get("fallback_proof")),
+    }
+
+
+def builtin_sites(profile: Profile | None = None) -> tuple[str, ...]:
+    """The Built In regional sites to scrape, as base URLs, or ().
+
+    Read from ``search.builtin_sites: [https://www.builtinseattle.com, ...]``.
+    Built In runs one site per metro, so the list is the candidate's market,
+    not the tool's: there is no default, and a profile without the key turns
+    the Built In scraper off. Each entry must be an https base URL (no path,
+    query, fragment or port) on a Built In host (``builtin<metro>.com``,
+    ``www.`` optional); anything else fails loudly, because a wrong address
+    would quietly scrape nothing every run. Entries come back as
+    ``https://<host>`` (lower case, no trailing slash), each once, in order.
+    """
+    import re
+    from urllib.parse import urlsplit
+
+    search = (profile or PROFILE).get("search") or {}
+    sites = search.get("builtin_sites")
+    if sites is None:
+        return ()
+    source = (profile or PROFILE).source
+    example = "e.g. [https://www.builtinseattle.com]"
+    if isinstance(sites, str) or not isinstance(sites, (list, tuple)):
+        raise ValueError(
+            f"search.builtin_sites in {source} must be a list of Built In base URLs, {example}."
+        )
+    cleaned: list[str] = []
+    for site in sites:
+        url = str(site).strip().rstrip("/") if isinstance(site, str) else ""
+        parts = urlsplit(url) if url else None
+        host = (parts.hostname or "") if parts else ""
+        label = host[4:] if host.startswith("www.") else host
+        if (
+            not parts
+            or parts.scheme != "https"
+            or not re.fullmatch(r"builtin[a-z0-9-]*\.[a-z]{2,}", label)
+            or parts.port is not None
+            or parts.path
+            or parts.query
+            or parts.fragment
+            or parts.username
+            or parts.password
+        ):
+            raise ValueError(
+                f"search.builtin_sites in {source} has {site!r}: each entry must be an "
+                f"https base URL on a Built In host (builtin*), {example}."
+            )
+        base = f"https://{host}"
+        if base not in cleaned:
+            cleaned.append(base)
+    return tuple(cleaned)

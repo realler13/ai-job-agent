@@ -48,6 +48,7 @@ from .config import (
     location_priority,
     resolve_cv_domain,
 )
+from .candidate_profile import apple_target_band
 from .gpt_filter import DEFAULT_PROMPT_TEMPLATE, STAGE2_PROMPT_CLAUDE, call_llm
 from .jd_sanitizer import SanitizedJD, sanitize_jd
 
@@ -215,27 +216,56 @@ def _model_description(row) -> str:
 # Apple publishes the level on the detail page (scrapes.job_level: "Producer
 # IC4", "Human Interface Producer ICT4–ICT5", "Content Production MGR2"), so
 # a posting can be compared with a target band without reading the title.
-# The band below is a built-in default for a mid-level individual contributor
-# (the level of the shipped example profile); it is not read from the profile.
+# The band comes from the profile (search.apple_target_band: {low, high}).
+# There is no default band: a profile that leaves it out turns the rule off
+# (the three constants below are None, no level gets a verdict, and the
+# judges' level line names no band).
 # Only Apple-format codes count — LinkedIn's "Mid-Senior level" lives in the
 # same column and is ignored.
 _APPLE_LEVEL_RE = re.compile(r"\b(ICT|IC|MGR)\s?(\d)\b")
-APPLE_TARGET_BAND = "IC2–IC3"
+
+
+def _band_label(low: int, high: int) -> str:
+    return f"IC{low}" if low == high else f"IC{low}–IC{high}"
+
+
+def _band_constants(profile=None) -> tuple:
+    """(low, high, label) for the profile's search.apple_target_band, or
+    (None, None, None) when the profile has none: the Apple level rule is off.
+    A malformed band raises (candidate_profile.apple_target_band)."""
+    band = apple_target_band(profile)
+    if band is None:
+        return None, None, None
+    low, high = band
+    return low, high, _band_label(low, high)
+
+
+#: The band's level numbers, and the band as the notes and the judges'
+#: description line spell it ("IC3–IC4"). All None: no band, the rule is off.
+APPLE_TARGET_LOW, APPLE_TARGET_HIGH, APPLE_TARGET_BAND = _band_constants()
 
 
 def apple_level_verdict(job_level) -> Optional[tuple[str, str]]:
     """(action, note) for an Apple-format level, or None when there is none.
 
     action: 'reject_manager' | 'reject_below' | 'reject_above' | 'cap' |
-    'in_band'. Rules, on the low and high ends of the published range: the
-    MGR (people-manager) ladder → reject; high end <= 1 → reject (below the candidate's
-    level); low end >= 5 → reject (above the candidate's level); low end == 4 → cap at
-    worth_a_look; a level or range that includes 2 or 3 → in band."""
+    'in_band'. Rules, on the low and high ends of the published range against
+    the target band [low, high]: the MGR (people-manager) ladder → reject;
+    high end below the band → reject (below the candidate's level); low end
+    two or more levels above the band → reject; low end one level above → cap
+    at worth_a_look; a level or range that touches the band → in band.
+    The band is read at call time, so a test can set another one. With no
+    band (the profile leaves search.apple_target_band out) the rule is off:
+    every level gives None, the same result as a posting with no level."""
     if not isinstance(job_level, str):
         return None
     codes = _APPLE_LEVEL_RE.findall(job_level)
     if not codes:
         return None
+    if APPLE_TARGET_LOW is None or APPLE_TARGET_HIGH is None:
+        return None
+    band_low, band_high = APPLE_TARGET_LOW, APPLE_TARGET_HIGH
+    band = _band_label(band_low, band_high)
     nums = [int(n) for _, n in codes]
     lo_i, hi_i = nums.index(min(nums)), nums.index(max(nums))
     lo, hi = nums[lo_i], nums[hi_i]
@@ -243,13 +273,13 @@ def apple_level_verdict(job_level) -> Optional[tuple[str, str]]:
     label = low_code if lo == hi else f"{low_code}–{''.join(codes[hi_i])}"
     if any(ladder == "MGR" for ladder, _ in codes):
         return "reject_manager", (f"[Apple level {label} — people-manager ladder, outside the candidate's "
-                                  f"target band {APPLE_TARGET_BAND}]")
-    if hi <= 1:
-        return "reject_below", f"[Apple level {label} — below the candidate's target band {APPLE_TARGET_BAND}]"
-    if lo >= 5:
-        return "reject_above", f"[Apple level {label} — above the candidate's target band {APPLE_TARGET_BAND}]"
-    if lo == 4:
-        return "cap", f"[Apple level {low_code} — above the candidate's target band {APPLE_TARGET_BAND}]"
+                                  f"target band {band}]")
+    if hi < band_low:
+        return "reject_below", f"[Apple level {label} — below the candidate's target band {band}]"
+    if lo >= band_high + 2:
+        return "reject_above", f"[Apple level {label} — above the candidate's target band {band}]"
+    if lo == band_high + 1:
+        return "cap", f"[Apple level {low_code} — above the candidate's target band {band}]"
     return "in_band", f"[Apple level {label}: in the candidate's target band]"
 
 
@@ -268,7 +298,8 @@ def _apply_apple_level_rule(result: pd.DataFrame) -> None:
     tier None, rejection_rule, gpt_relevance) so feeds and stats stay
     coherent; it applies to tiered rows and to rows Stage 2 left pending
     (the level alone decides those). Rows a judge already rejected keep
-    their own reason."""
+    their own reason. With no band in the profile every verdict is None,
+    so no row changes and no note is added."""
     if "job_level" not in result.columns:
         return
     for idx, level in result["job_level"].items():
@@ -1296,6 +1327,7 @@ Description: {desc}
             # level, not the title: a level inside APPLE_TARGET_BAND stays in
             # band; one level above is capped at worth_a_look; anything lower,
             # two or more levels above, or on the MGR ladder is rejected.
+            # Off (no change, no note) when the profile sets no band.
             _apply_apple_level_rule(result)
             # Apple contingent marketplace (WillHire / "(Contractor)"): capped.
             _apply_contingent_cap(result)

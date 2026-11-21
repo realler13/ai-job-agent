@@ -278,10 +278,10 @@ export default function JobsPage() {
                       Level: {job.job_level}
                     </span>
                   )}
-                  {job.ca_highlight && (
+                  {job.home_state_highlight && (
                     <div className="flex items-center gap-1 font-medium text-green-700 dark:text-green-500">
                       <MapPin className="size-3 shrink-0" />
-                      <span className="truncate">✓ Matching location: {job.ca_highlight}</span>
+                      <span className="truncate">✓ Matching location: {job.home_state_highlight}</span>
                     </div>
                   )}
                   {job.date_posted && (

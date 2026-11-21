@@ -1,0 +1,478 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Test fixture profile — FICTIONAL.
+#
+# Marisol Vantongeren, her employers, places and every number below are
+# invented. She is the same person as tests/fixtures/fictional_career.md (the
+# base CV the writer tests build): same name, same employers and dates, same
+# numbers, same canonical years figure ("11+ years").
+#
+# tests/conftest.py pins this file through $JOB_AGENT_PROFILE before anything
+# imports job_agent, so the suite never depends on profiles/example.yaml or on
+# a profile.yaml someone keeps locally. Change a value here and in
+# fictional_career.md together.
+#
+# The search block (Seattle metro primary, Portland metro capped, keywords,
+# exclusions) matches profiles/example.yaml on purpose: the location and
+# keyword tests exercise the same market the shipped example describes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+candidate:
+  name: Marisol Vantongeren
+  first_name: Marisol
+  last_name: Vantongeren
+  headline: hands-on mid-level video producer
+  years_experience: 11+ years
+  pronouns:
+    subject: she
+    object: her
+    possessive: her
+  email: marisol.vantongeren@example.invalid
+  phone: 555-0187
+  website: portfolio.example.invalid/marisol
+  note: Fictional test fixture (tests/fixtures/test_profile.yaml). Not a real person.
+  network_label: candidate
+# Nothing lives under tests/fixtures/absent/: the transcript and the career
+# source bank read as absent, so a local profile/ folder (gitignored, holding
+# someone's real documents) can never reach a test. Tests that need a source
+# bank or a transcript monkeypatch the loader with a fixture string.
+paths:
+  resume: tests/fixtures/absent/resume.pdf
+  base_cv: tests/fixtures/absent/base_cv.docx
+  base_cv_dir: tests/fixtures/absent
+  transcript: tests/fixtures/absent/transcript.md
+  source_bank: tests/fixtures/absent/source_bank.md
+search:
+  # primary_metro_terms -> the classifier's top class, secondary_metro_terms ->
+  # its capped class (on-site there is shown as "worth a look" at most).
+  # A town whose name also exists elsewhere is written with its state
+  # ("vancouver, wa") and then counts only next to that state. state_code /
+  # state_name are the home state: on-site elsewhere in it passes to the judge,
+  # other states are dropped. A bare metro term also counts in any state named
+  # under `allowed` (oregon / or for the Portland metro).
+  locations:
+    home: Seattle, WA
+    primary_metro_label: Seattle metro
+    primary_metro_terms:
+    - seattle
+    - bellevue
+    - redmond
+    - kirkland
+    - tacoma
+    - everett
+    - renton
+    - bothell
+    - puget sound
+    secondary_metro_label: Portland metro
+    secondary_metro_terms:
+    - portland
+    - beaverton
+    - hillsboro
+    - vancouver, wa
+    - gresham
+    allowed:
+    - seattle
+    - bellevue
+    - redmond
+    - kirkland
+    - tacoma
+    - washington
+    - wa
+    - portland
+    - oregon
+    - or
+    - remote
+    - hybrid
+    state_code: wa
+    state_name: washington
+    secondary_metro_abbrev: ''
+  comp_floor_yearly: 50000
+  comp_floor_secondary_metro: 100000
+  comp_floor_note: A role whose pay CEILING falls under the floor is dropped. On-site roles
+    in the secondary metro must clear a higher floor. Unstated pay is never penalised.
+    These two values are the floors that are applied; comp_utils.py falls back to the
+    same numbers when a profile leaves them out.
+  # Apple internal levels: in band IC3 to IC4, IC5 capped, IC2 and below /
+  # IC6+ / MGR rejected. The tool has no default band (a profile without this
+  # key turns the Apple level rule off); the Apple-level tests read their band
+  # from here.
+  apple_target_band:
+    low: 3
+    high: 4
+  # Built In has a site per metro: check the address opens before adding one (no key = no Built In).
+  builtin_sites:
+  - https://www.builtinseattle.com
+  # Postings older than this are dropped before grading (the Review list shows
+  # nothing older than 7 days anyway).
+  stale_posting_days: 7
+  # Search titles, grouped by the CV variant they route to (see `domains`).
+  # Unlike profiles/example.yaml, every domain has titles here, so the routing
+  # tests (config.resolve_cv_domain) exercise all eight base-CV variants.
+  keywords_by_category:
+    producer_core:
+    - Producer
+    - Senior Producer
+    - Associate Producer
+    - Video Producer
+    - Senior Video Producer
+    - Content Producer
+    - Branded Content Producer
+    - Documentary Producer
+    - Series Producer
+    - Creative Producer
+    - Line Producer
+    - Post Producer
+    live_and_experiential:
+    - Broadcast Producer
+    - Studio Producer
+    - Live Producer
+    - Event Producer
+    production_ops_and_management:
+    - Production Manager
+    - Post-Production Manager
+    - Content Production Manager
+    - Studio Manager
+    - Studio Operations
+    project_and_program_management:
+    - Creative Project Manager
+    - Video Project Manager
+    - Content Program Manager
+    - Campaign Producer
+    podcast_and_audio:
+    - Podcast Producer
+    - Audio Producer
+    youtube_and_creators:
+    - YouTube Producer
+    - YouTube Channel Manager
+    - Creator Partnerships Manager
+    games_production:
+    - Game Producer
+    - Development Producer
+    production_admin:
+    - Production Administrator
+  exclude_phrases:
+  - intern
+  - internship
+  - apprentice
+  - sales
+  - sdr
+  - bdr
+  - account executive
+  - engineer
+  - developer
+  - software
+  - nurse
+  - driver
+  - technician
+  - instructional designer
+  - learning designer
+  - educational technologist
+  - adjunct
+  - faculty
+  - teacher
+  - professor
+  - video editor
+  - camera operator
+  - community manager
+  - social media coordinator
+  - social media specialist
+  - influencer coordinator
+  - pr coordinator
+  - technical program manager
+  - technical project manager
+  - engineering program manager
+  - engineering project manager
+  - it project manager
+  - it program manager
+  - scrum master
+  - agile coach
+  - release manager
+  - site reliability
+  - devops
+  - infrastructure
+  - data scientist
+  - data analyst
+  - machine learning
+  - product manager
+  negative_keywords_industrial:
+  - manufacturing
+  - plant
+  - factory
+  - warehouse
+  - construction
+  - foreman
+  - assembly line
+  - production line
+  - cgmp
+  - gmp
+  - pharma
+  - chemical
+  - semiconductor
+  - mechanical engineer
+  - electrical engineer
+  - civil engineer
+  - civil engineering
+  - mechanical engineering
+  - electrical engineering
+  - hvac
+  - industrial
+  - oil
+  - gas
+  negative_keywords_tech:
+  - kubernetes
+  - terraform
+  - ci/cd
+  - saas
+  - microservices
+  - sql
+  - python
+  - java
+  - typescript
+  - react
+  - node.js
+  - aws
+  - azure
+  - gcp
+  - docker
+metrics_text: 'VERIFIED METRICS (use only these numbers — never invent others):
+
+  - 11+ years producing documentary, branded and studio video (CANONICAL years figure —
+  always state "11+ years"; never a larger number)
+
+  - EMPLOYMENT STATUS RULE: Tidewater Signal Studios is a PAST role (Mar 2023 – Jan 2026).
+  Use past tense for it; never "currently".
+
+
+  Tidewater Signal Studios (Producer, Mar 2023 – Jan 2026, documentary series):
+
+  - 40 episodes of a harbor documentary series produced on a fixed budget
+
+  - 12 volunteer camera operators trained in two weekends
+
+  - Educational video series for a maritime museum, three seasons
+
+  - Weekly production summary that replaced a 90-minute status meeting
+
+  - Vendor costs cut 18% by rebidding the lighting and grip packages
+
+
+  Lanternfish Media Collective (Producer, Jun 2020 – Feb 2023, remote):
+
+  - 9-person remote post team across four time zones
+
+  - 25 branded shorts delivered, average turnaround of 6 days
+
+
+  Copperline Broadcast Group (Associate Producer, Aug 2017 – May 2020):
+
+  - 120 studio days a year scheduled for two live shows
+
+  - Crews of up to 30 (releases, call sheets, travel)
+
+  - $250K seasonal budget tracked to within 2%
+
+
+  Quillfeather Community Films (Production Coordinator, Jan 2015 – Jul 2017):
+
+  - 14 short films (locations, permits, catering)
+
+  - Volunteer roster and skills matrix for 60 crew members
+
+
+  Tooling: budgeting, scheduling, call sheets, vendor management, edit supervision.'
+# The fallback cover letter (docs_builder.templated_letter). Every number
+# restates a line of metrics_text above; tests/test_cover_letter.py checks it.
+# All eight domains are listed so every routing branch has its own proofs.
+letter_template:
+  opening: I am a hands-on producer who plans, budgets, schedules and delivers documentary,
+    branded and studio video.
+  proofs:
+    recent_series: In my most recent role, I produced 40 episodes of a harbor documentary
+      series on a fixed budget.
+    recent_vendors: In my most recent role, I cut vendor costs 18% by rebidding the lighting
+      and grip packages.
+    recent_training: In my most recent role, I trained 12 volunteer camera operators in two
+      weekends.
+    recent_reporting: In my most recent role, I wrote a weekly production summary that
+      replaced a 90-minute status meeting.
+    remote_post: At a remote media collective, I coordinated a 9-person remote post team
+      across four time zones.
+    remote_shorts: At a remote media collective, I delivered 25 branded shorts with an
+      average turnaround of 6 days.
+    broadcast_studio: As an associate producer in broadcast, I scheduled 120 studio days a
+      year for two live shows.
+    broadcast_budget: As an associate producer in broadcast, I tracked a $250K seasonal
+      budget to within 2%.
+    broadcast_crews: As an associate producer in broadcast, I handled releases, call sheets
+      and travel for crews of up to 30.
+    community_films: As a production coordinator, I handled locations, permits and catering
+      for 14 short films.
+  proofs_by_domain:
+    producer_core: [recent_series, remote_shorts, broadcast_studio]
+    live_and_experiential: [broadcast_studio, broadcast_crews, recent_training]
+    production_ops_and_management: [recent_reporting, recent_vendors, broadcast_budget]
+    project_and_program_management: [remote_post, broadcast_budget, recent_reporting]
+    podcast_and_audio: [recent_series, remote_post, broadcast_studio]
+    youtube_and_creators: [remote_shorts, recent_series, remote_post]
+    games_production: [remote_post, recent_reporting, broadcast_budget]
+    production_admin: [broadcast_crews, recent_vendors, community_films]
+  fallback_proof: In my recent roles, I planned, budgeted and delivered productions end to
+    end and kept crews and vendors on schedule.
+rules:
+  candidate_summary: >-
+    The candidate is a hands-on PRODUCER — a mid-level individual contributor in video,
+    documentary, branded content and studio broadcast. She plans, budgets, schedules, books
+    crews and vendors, and delivers finished productions. She is based in Seattle and works
+    on-site in the Seattle metro or remote for US-based employers; on-site in the Portland
+    metro is acceptable but a weaker option. She has 11+ years of production experience and
+    targets individual-contributor roles with no direct reports.
+  target_roles: |-
+    STRONG TARGET (top tier): mid-level individual-contributor production —
+    Producer, Senior Producer (IC), Associate Producer, Lead Producer, Line
+    Producer, hands-on Production Manager (owning schedules/budgets/vendors,
+    not people). Associate Producer is a legitimate target level, NOT junior.
+
+    BELOW-LEVEL WALL: entry-level roles (coordinator-level, assistant, trainee,
+    or a posting whose experience requirement tops out at 0-2 years) sit below
+    the target level → REJECT. A title that co-names a producer role is judged
+    on the description.
+  seniority_rule: |-
+    PEOPLE-MANAGEMENT TEST (run FIRST): scan the DESCRIPTION, not the title, for
+    explicit direct-report language — "manage a team of", "hire", "headcount",
+    "direct reports", "performance reviews". If the role's CORE is people
+    management, REJECT: the target level is individual-contributor with no
+    direct reports, however production-relevant the title looks. An org-level
+    executive title (VP / SVP / Chief / Head of <function>) is people
+    management by definition → also REJECT.
+
+    The hands-on exception (a REAL match, not a reject) holds only when the role
+    owns SCHEDULES / BUDGETS / VENDORS / DELIVERABLES with NO team to manage —
+    "collaborate with the team" is NOT people management.
+
+    LEADERSHIP-TITLE CAP: an over-leveled or ambiguous leadership TITLE
+    (Principal / Lead / Executive Producer) with NO direct-report evidence is AT
+    MOST the lower tier — keep it visible, it may be an inflated title on a
+    hands-on job; do NOT reject on the title alone.
+
+    DIRECTOR DISAMBIGUATION: "Director" has three readings, and your reasoning
+    must NAME which one the JD shows. (a) ORG-SENIORITY Director (owns strategy,
+    teams, departmental budgets) → REJECT. (b) CRAFT Director (film/video
+    director, art director, creative director — directs the creative work itself)
+    → REJECT. (c) INFLATED TITLE on hands-on IC work, evidenced by
+    schedules/budgets/vendors duties → lower tier. Readings (a) and (b) are
+    REJECT, never "capped": the leadership-title cap does NOT apply to Director
+    titles, and naming (a) or (b) and then keeping the role is the exact
+    contradiction the verdict-binding rule forbids. A Director title with an EMPTY
+    or stub description has no evidence for (c) and is a REJECT — the general
+    "insufficient description → ambiguous, keep visible" branch does not apply to
+    Director titles.
+  craft_rule: |-
+    CRAFT-SPECIALIST TEST: REJECT when the core deliverable is personally
+    executing a craft (editing, shooting, design, sound) instead of producing:
+      - Motion Designer / Animator / 3D Artist
+      - Videographer / Camera Operator
+      - Video Editor as the primary job
+      - Graphic / Visual Designer / Illustrator
+      - Sound or Audio Engineer / Mixer
+      - Physical event labour — stagehand, set construction, fabrication
+    The creative-craft LEADERSHIP ladder (Creative Director, Associate Creative
+    Director, Art Director, Design Director) is a different profession → REJECT.
+
+    HYBRID EXCEPTION (EVIDENCE-GATED): hybrid status requires the DESCRIPTION to
+    show real coordination duties — schedules, budgets, vendors, crew booking — as
+    a SUBSTANTIAL half. A slash-title or the bare word "producer" is NOT evidence;
+    if the day-to-day is operating the craft, it is a craft REJECT.
+  industry_rule: |-
+    PREFERRED INDUSTRIES: media, entertainment, streaming, gaming, the creator
+    economy, non-profit and public media, and in-house brand studios.
+
+    MARKETING-EVENTS WALL: corporate-marketing event roles (field marketing,
+    tradeshows, lead-generation events) → REJECT unless the description shows
+    produced-show duties. An events-sounding title does NOT rescue these: only
+    produced-show duties do (run-of-show, staging, AV/broadcast production,
+    filming, editorial output).
+
+    GOVERNMENT / DEFENSE WALL: roles supporting government, defense or military
+    programmes → REJECT even when the function reads as event or production
+    coordination — a different market from media production.
+  reject_rules: |-
+    SOCIAL-MEDIA / GROWTH TRAP: REJECT if the core is community management,
+    posting schedules, analytics/growth hacking, or copywriting dressed up as
+    "Content Strategist". ACCEPT producing content (video, audio, broadcast),
+    production ops, budgets and schedules, creative operations, studio
+    operations, media program/project management, or post-production.
+
+    TECH-PM TRAP: this search targets production roles; engineering and software
+    work is outside the target profile. REJECT Technical Program/Project Manager
+    roles with engineering oversight, anything requiring AWS / Kubernetes / CI-CD /
+    SQL / Python / microservices, and "Product Manager" roles (a different career
+    track). ACCEPT Project/Program Manager ONLY in media, entertainment, creative
+    or content-production contexts.
+
+    BUSINESS CAP: account / client / partner management or revenue ownership is AT
+    MOST the lower tier; REJECT outright when there is no production component.
+
+    ALSO REJECT: interns, unpaid or volunteer roles, 0-1-year-experience-only
+    postings, one-person-band videographer roles, video-GAME development producers
+    (shipping the game itself), music producers (recording artists), and
+    insurance/financial "producers".
+
+    OVERQUALIFIED EXCEPTION: accept junior titles at recognisable organisations
+    (major studios, streamers, public broadcasters, leading tech firms, well-known
+    universities) when the domain matches — mark these "overqualified but
+    strategic fit". This exception NEVER applies to coordinator-level, assistant,
+    trainee or 0-2-year roles: those are REJECT under the BELOW-LEVEL WALL.
+
+    VERDICT-BINDING (hard override, applies to every rule above): your verdict
+    MUST follow your own reasoning. If your analysis identifies ANY enumerated
+    reject condition, the verdict IS reject. Do NOT soften a disqualifier you
+    yourself named into the lower tier. The lower tier exists for exactly two
+    cases: a genuinely adjacent role with a SOFT gap, and a genuinely ambiguous
+    description. Writing "outside the candidate's domain" or "not
+    production-focused" and then keeping the role is a contradiction — resolve it
+    as a reject.
+application_answers:
+  first_name: Marisol
+  last_name: Vantongeren
+  city: Seattle
+  state: Washington
+  country: United States
+  # Placeholder values — write your own answers in profiles/profile.yaml.
+  heard_about: Job board
+  previously_worked: 'No'
+  authorized_to_work: 'Yes'
+  visa_sponsorship: 'No'
+  gender: Decline to answer
+  race_ethnicity: Decline to answer
+  veteran_status: Decline to answer
+  disability: Decline to answer
+# One base-CV variant per domain. The keys match what the code and
+# scripts/create_base_cvs.py know; a domain with no keywords above is simply
+# never routed to until you add titles for it.
+domains:
+  producer_core:
+    cv: base_cv_producer_core.docx
+    description: general video/content/media production
+  live_and_experiential:
+    cv: base_cv_live_experiential.docx
+    description: live events, broadcast, and experiential production — on-site execution,
+      venue and vendor logistics, and running crews on location for shows, live tapings,
+      and public events
+  production_ops_and_management:
+    cv: base_cv_production_ops.docx
+    description: production operations, workflow design, and studio management
+  project_and_program_management:
+    cv: base_cv_project_program.docx
+    description: cross-functional program/project management in creative industries
+  podcast_and_audio:
+    cv: base_cv_podcast_audio.docx
+    description: podcast and audio content production
+  youtube_and_creators:
+    cv: base_cv_youtube_creators.docx
+    description: YouTube channel management, creator partnerships, and platform growth
+  games_production:
+    cv: base_cv_games_production.docx
+    description: game production, sprint-based pipelines, and shipping interactive products
+  production_admin:
+    cv: base_cv_production_admin.docx
+    description: production administration, vendor operations, scheduling, asset management,
+      and cross-functional logistics in entertainment and media environments

@@ -207,11 +207,14 @@ def scrape_aquent_feed(keywords: list[str]) -> list[dict]:
     feed, no auth, refreshed every ~15 min; a contract/temp lane the ATS
     boards don't cover.
 
-    Filter: US items that are in California (the market this scraper was
-    first tuned for; change in_ca for your state) OR fully remote, then
+    Filter: US items in the profile's home state (search.locations
+    state_code / state_name) OR fully remote, then
     keyword match on title+segment. Titles carry a "[211286]" job-id suffix — strip it.
     """
     import re
+    from .config import HOME_STATE_CODE, HOME_STATE_NAME
+    # Aquent writes the state as a code ("WA") or, now and then, a name.
+    home_state = {HOME_STATE_CODE, HOME_STATE_NAME} - {""}
     try:
         resp = requests.get(AQUENT_FEED_URL, timeout=30,
                             headers={"User-Agent": "Mozilla/5.0"})
@@ -231,8 +234,8 @@ def scrape_aquent_feed(keywords: list[str]) -> list[dict]:
         # ONLY "Fully remote" counts as remote — hybrid/partial remote in an
         # out-of-market city still means an on-site commute.
         remote = (item.findtext("remotetype") or "").strip().lower() == "fully remote"
-        in_ca = state in ("CA", "California")
-        if not (in_ca or remote):
+        in_home = state.lower() in home_state
+        if not (in_home or remote):
             continue
 
         title = re.sub(r"\s*\[\d+\]\s*$", "", (item.findtext("title") or "").strip())
@@ -245,7 +248,7 @@ def scrape_aquent_feed(keywords: list[str]) -> list[dict]:
         desc = re.sub(r"\s+", " ", desc).strip()
         # Fully-remote items must read "Remote" for our location gate even
         # when Aquent lists a base city — keep the city as context in desc.
-        if remote and not in_ca:
+        if remote and not in_home:
             location = "Remote"
             if city:
                 desc_note = f"[Team base: {city}, {state}] "

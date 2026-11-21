@@ -63,24 +63,34 @@ Both files are optional; a missing file is skipped.
 |---|---|
 | `home` | the location sent to the job boards on the main scrape pass, and `{{profile.home_location}}` in prompts |
 | `primary_metro_label` | display name of your metro; the fallback location for company and salary research |
-| `primary_metro_terms` | lower-case place names that classify a posting as "in the primary metro" |
+| `primary_metro_terms` | lower-case place names that classify a posting as "in the primary metro". Write a town whose name also exists elsewhere with its state: `vancouver, wa` |
 | `secondary_metro_label` | the location of the second scrape pass (switch the pass off with `SECONDARY_SECOND_PASS` in `config.py`) |
 | `secondary_metro_terms` | place names that classify a posting as "in the secondary metro": still shown, but capped at the lower tier and held to the higher pay floor |
-| `allowed` | the pre-filter's allow-list: a posting whose location matches none of these is dropped before any model sees it. Include your cities, your state's name and abbreviation, and `remote` / `hybrid` if you want them |
-| `state_code`, `state_name`, `secondary_metro_abbrev` | reserved |
+| `allowed` | your cities, your state's name and abbreviation, and `remote` / `hybrid` if you want them (the API's `/api/config` lists them). A US state named here (`oregon` / `or`) is also a state where a bare metro term counts — list the state of a secondary metro that sits across a state line |
+| `state_code`, `state_name` | your home state (`wa` / `washington`). On-site postings elsewhere in it pass to the judge; other states are dropped; a bare label for it ("Washington", "WA, US") is never blocked by the location feedback loop. If both are missing, the state at the end of `home` is used |
+| `secondary_metro_abbrev` | a bare abbreviation that means the secondary metro on its own (`pdx` for a Portland metro). Leave it empty when there is none; only an exact match counts, so a location that merely contains it ("PDX Airport, OR") is not read as the metro |
 
-**The location rules were first tuned for California metros.** The term lists
-above come from your profile, but the classifier in `config.py`
-(`classify_location`) keeps its original internals: the class for the primary
-metro is called `bay`, the class for the secondary metro is called `la`, and
-there are helper lists for California place names that also exist elsewhere,
-plus tables that treat other US states and other countries as out of area.
-The example profile shows the intended way to point the rules elsewhere —
-Seattle as the primary metro, Portland as the secondary — but check a handful
-of real locations from your market before you trust the gate:
+How a location is read (`classify_location` in `config.py`):
+
+1. a primary-metro term → top priority (`primary`);
+2. remote, unless pinned to a non-US region → actionable (`remote`);
+3. a secondary-metro term, on-site → shown, capped at the lower tier (`secondary`);
+4. elsewhere in your home state → passed to the judge (`home_state`);
+5. another US state or another country → dropped (`reject`);
+6. a bare national label or nothing → passed to the judge (`unknown`).
+
+A term without a state (`portland`) counts unless the location names a US
+state that is neither your home state nor one listed in `allowed`
+("Portland, ME"), or another country ("Kirkland, QC, Canada"). A term with a
+state (`vancouver, wa`) counts only when the location names that state, by
+code or by name ("Vancouver, WA", "Vancouver, Washington"). Write every town
+whose name also exists elsewhere in that form. In a multi-location posting
+each option is read on its own, and any in-area option makes the posting
+actionable. Check a handful of real locations from your market before you
+trust the gate:
 
 ```bash
-PYTHONPATH=src python -c "from job_agent.config import classify_location as c; print(c('Tacoma, WA'), c('Portland, OR'), c('Remote'), c('Austin, TX'))"
+PYTHONPATH=src python -c "from job_agent.config import classify_location as c; print(c('Tacoma, WA'), c('Portland, OR'), c('Spokane, WA'), c('Remote'), c('Austin, TX'))"
 ```
 
 If you have no secondary metro, leave `secondary_metro_terms` as an empty
@@ -101,12 +111,45 @@ drives run time and cost. Start small.
 
 ### Pay floor
 
-`comp_floor_yearly`, `comp_floor_secondary_metro` and `comp_floor_note` are
-reserved: in this release the floors are the constants `COMP_FLOOR_YEARLY`
-and `COMP_FLOOR_LA_ONSITE` in `src/job_agent/comp_utils.py`. Change them
-there. The rule itself: a role whose pay *ceiling* is under the floor is
-removed from the feed; unstated pay is never penalised; on-site roles in the
-secondary metro must clear the higher floor.
+`comp_floor_yearly` is the yearly pay floor; `comp_floor_secondary_metro`
+is the higher floor for on-site roles in the secondary metro. A profile that
+leaves one out gets the default from `src/job_agent/comp_utils.py` ($50,000
+and $100,000). `comp_floor_note` is free text for you; nothing reads it. The
+rule itself: a role whose pay *ceiling* is under the floor is removed from
+the feed; unstated pay is never penalised; on-site roles in the secondary
+metro must clear the higher floor.
+
+### `search.apple_target_band`
+
+Apple publishes an internal level on its job pages (IC2 entry, IC3 mid, IC4
+senior, IC5 staff; MGR is the people-manager ladder). `{low: 3, high: 4}` keeps
+a level inside the band, caps one level above it at "worth a look", and rejects
+anything lower, two or more levels above, or on the MGR ladder. The key is
+optional and has no default: leave it out and the Apple level rule is off. No
+posting is then capped or rejected for its Apple level, and the level line the
+judges read names no band (the digest and the web UI still show the level). A
+malformed band (not whole numbers, or not `1 <= low <= high <= 9`) raises an
+error that names the key.
+
+### `search.builtin_sites`
+
+[Built In](https://builtin.com) runs one job site per metro
+(`https://www.builtinseattle.com`, `https://www.builtinnyc.com`, ...). List the
+ones for your market as https base URLs:
+
+```yaml
+search:
+  builtin_sites:
+  - https://www.builtinseattle.com
+```
+
+Check that each address opens in a browser before you add it: not every metro
+has a site. The key is optional and has no default: leave it out and the Built
+In scraper is off (it makes no request and logs one line saying so). Each entry
+must be an https URL on a Built In host, with no path; anything else raises an
+error that names the key. A card's location is the first of your
+`primary_metro_terms`, then `secondary_metro_terms` (the town of a term written
+with its state), then "Remote" or "Hybrid", that the card mentions.
 
 ## `metrics_text`
 
@@ -123,6 +166,23 @@ anti-hallucination contract, so it is worth writing carefully:
 Instead of prose you can supply a `metrics` list of entries with `value`,
 `context`, `employer` and `period`; it is rendered into the same block. If
 both are present, `metrics_text` wins.
+
+## `letter_template`
+
+The fallback cover letter: it ships when the letter check cannot run, when a
+posting has no text, or when too little of the model's letter survives the
+checks. Optional; without it the fallback is a short, number-free letter.
+
+| Key | What it is |
+|---|---|
+| `opening` | the first sentence after "I am writing to apply for ..." |
+| `proofs` | `{name: sentence}`: one past-tense proof per name |
+| `proofs_by_domain` | `{domain: [2-3 proof names]}`, strongest first; a domain not listed uses `producer_core`'s |
+| `fallback_proof` | optional number-free sentence used when no proof survives |
+
+Every number in these sentences must restate `metrics_text`: each sentence is
+checked against it when the letter is built, and a failing one is dropped (with
+a warning in the log). Name no employers here; the letter is about the work.
 
 ## `rules`
 

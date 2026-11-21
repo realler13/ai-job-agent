@@ -25,7 +25,7 @@ export interface Job {
   // For a multi-location posting, the listed location that matches the
   // profile's search area (server-computed) — shown so the candidate sees
   // which listed location is the right one.
-  ca_highlight?: string | null
+  home_state_highlight?: string | null
   // Per-job compensation + employment type (2026-07-26), extracted
   // deterministically at save time (comp_utils.extract_comp).
   comp_text?: string | null

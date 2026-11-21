@@ -129,55 +129,125 @@ ALLOWED_LOCATIONS = list(SEARCH["locations"]["allowed"])
 
 
 # === Location Priority ===
-# The home location and both metro term lists come from the profile
-# (search.locations). Primary-metro roles are fully actionable; remote works;
-# on-site roles in the secondary metro are treated as a long commute — they
-# are still surfaced, but capped at the worth_a_look tier, excluded from
-# premium Stage-3 judging and from automatic CV generation: visible, but they
-# don't consume the reviewer's attention or the model budget.
-# The class names used below ("bay" = primary metro, "la" = secondary metro,
-# "ca" = rest of the home state) and the California-specific helpers are
-# functional identifiers kept from the example market the tool was first
-# tuned for.
-PRIMARY_METRO_TERMS = list(SEARCH["locations"]["primary_metro_terms"])
-# Example-market helper: Bay Area cities whose names also exist elsewhere
-# ("Dublin, Ireland", "Newark, NJ", "Brisbane, Australia") count as Bay Area
-# only when the location also says California.
-BAY_AREA_CA_TERMS = [
-    "dublin", "newark", "union city", "alameda", "belmont", "brisbane",
-    "danville", "saratoga",
-]
-SECONDARY_METRO_TERMS = list(SEARCH["locations"]["secondary_metro_terms"])
-# Example-market helper: LA County places whose names also exist elsewhere
-# count as LA only with California.
-LA_METRO_CA_TERMS = ["hawthorne", "carson", "downey", "gardena"]
+# Everything about WHERE the candidate can work comes from the profile
+# (search.locations): the home state, both metro term lists, the allow-list
+# and the secondary metro's abbreviation. Primary-metro roles are fully
+# actionable; remote works; on-site roles in the secondary metro are treated
+# as a long commute — they are still surfaced, but capped at the worth_a_look
+# tier, excluded from premium Stage-3 judging and from automatic CV
+# generation: visible, but they don't consume the reviewer's attention or the
+# model budget.
+# classify_location names its classes by meaning: "primary" (the primary
+# metro), "secondary" (the secondary metro) and "home_state" (the rest of the
+# home state).
+_LOCATIONS = SEARCH["locations"]
+
+# One table for the whole country; the profile's own state is taken out of
+# the "other states" sets below at import.
+_US_STATES = {
+    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
+    "ca": "california", "co": "colorado", "ct": "connecticut",
+    "de": "delaware", "fl": "florida", "ga": "georgia", "hi": "hawaii",
+    "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa",
+    "ks": "kansas", "ky": "kentucky", "la": "louisiana", "me": "maine",
+    "md": "maryland", "ma": "massachusetts", "mi": "michigan",
+    "mn": "minnesota", "ms": "mississippi", "mo": "missouri",
+    "mt": "montana", "ne": "nebraska", "nv": "nevada", "nh": "new hampshire",
+    "nj": "new jersey", "nm": "new mexico", "ny": "new york",
+    "nc": "north carolina", "nd": "north dakota", "oh": "ohio",
+    "ok": "oklahoma", "or": "oregon", "pa": "pennsylvania",
+    "ri": "rhode island", "sc": "south carolina", "sd": "south dakota",
+    "tn": "tennessee", "tx": "texas", "ut": "utah", "vt": "vermont",
+    "va": "virginia", "wa": "washington", "wv": "west virginia",
+    "wi": "wisconsin", "wy": "wyoming",
+}
+_US_STATE_NAME_TO_CODE = {name: code for code, name in _US_STATES.items()}
+# DC has a code but no state name in the table: "washington" is the state.
+_US_STATE_CODES = set(_US_STATES) | {"dc"}
+
+# State codes that are also ordinary words ("in", "or", "me", "ok", ...):
+# for these the code counts only as its own comma-delimited segment
+# ("Gary, IN"), never as a loose word ("remote or hybrid").
+_WORDLIKE_STATE_CODES = {"al", "co", "de", "hi", "id", "in", "la", "ma", "me",
+                         "oh", "ok", "or", "pa"}
+# Home-state codes that are also country codes in job-board location strings
+# ("Toronto, ON, CA", "Bengaluru, KA, IN", "Berlin, BE, DE"): such a code alone
+# is not evidence of a US location.
+_STATE_CODES_ALSO_COUNTRIES = {"ca", "in", "de"}
+
+
+def _state_code(value) -> str:
+    """'WA' / 'Washington' -> 'wa'; anything else -> ''."""
+    v = str(value or "").strip().lower()
+    if v in _US_STATE_CODES:
+        return v
+    return _US_STATE_NAME_TO_CODE.get(v, "")
+
+
+# The home state: search.locations.state_code (or state_name), else the state
+# at the end of `home` ("Seattle, WA"). A profile with none of these has no
+# "rest of the home state" class: every state-wide place outside the two
+# metros reads as out of area.
+HOME_STATE_CODE = (_state_code(_LOCATIONS.get("state_code"))
+                   or _state_code(_LOCATIONS.get("state_name"))
+                   or _state_code(str(_LOCATIONS.get("home") or "").split(",")[-1]))
+HOME_STATE_NAME = _US_STATES.get(HOME_STATE_CODE, "")
+
+# Non-home US states. Abbreviations are matched only as a comma-delimited
+# segment ("Jay, OK") to avoid colliding with words like "in" / "or"; full
+# state names are matched as substrings (low collision risk).
+_US_STATE_ABBR_OTHER = _US_STATE_CODES - {HOME_STATE_CODE}
+_US_STATE_NAMES_OTHER = set(_US_STATES.values()) - {HOME_STATE_NAME}
+# Longest name first, so "west virginia" is read whole before "virginia" and
+# "arkansas" before "kansas".
+_STATE_NAME_RE = re.compile("|".join(
+    re.escape(n) for n in sorted(_US_STATES.values(), key=len, reverse=True)))
+# "Washington, DC" / "Washington D.C." is the District, not Washington state.
+_DC_RE = re.compile(r"\bwashington\s*,?\s*d\.?\s?c\b\.?")
+
+# A bare abbreviation that means the secondary metro on its own, such as
+# "pdx" (empty = none). Only an exact match counts: "PDX Airport, OR" is not it.
+SECONDARY_METRO_ABBREV = str(_LOCATIONS.get("secondary_metro_abbrev") or "").strip().lower()
+
+# States a bare metro term may appear with: the home state plus any state
+# named in the allow-list (a secondary metro across a state line, such as a
+# Portland metro for a Seattle candidate, lists "oregon" there). A bare term
+# with any other state ("Portland, ME") is a different town.
+_METRO_STATES = {HOME_STATE_CODE} - {""}
+for _entry in _LOCATIONS.get("allowed") or []:
+    _code = _state_code(_entry)
+    if _code and str(_entry).strip().lower() != SECONDARY_METRO_ABBREV:
+        _METRO_STATES.add(_code)
+
+
+def _parse_metro_term(term: str):
+    """'dublin, oh' -> ('dublin', 'oh'); 'seattle' -> ('seattle', None).
+    A term written with a US state counts only where the location names that
+    state; one without a state counts as a bare place name."""
+    t = str(term or "").strip().lower()
+    if "," in t:
+        town, _, state = t.rpartition(",")
+        code = _state_code(state)
+        if code and town.strip():
+            return town.strip(), code
+    return t, None
+
+
+PRIMARY_METRO_TERMS = list(_LOCATIONS["primary_metro_terms"])
+SECONDARY_METRO_TERMS = list(_LOCATIONS["secondary_metro_terms"])
+_PRIMARY_PARSED = [_parse_metro_term(t) for t in PRIMARY_METRO_TERMS if str(t or "").strip()]
+_SECONDARY_PARSED = [_parse_metro_term(t) for t in SECONDARY_METRO_TERMS if str(t or "").strip()]
+# The metro terms that carry their state — place names that also exist
+# elsewhere ("Dublin, Ireland", "Vancouver, BC"). Write such towns in the
+# profile as "town, st".
+PRIMARY_METRO_STATED_TERMS = [f"{town}, {st}" for town, st in _PRIMARY_PARSED if st]
+SECONDARY_METRO_STATED_TERMS = [f"{town}, {st}" for town, st in _SECONDARY_PARSED if st]
 # Remote is decided from the LOCATION field only — NOT the title. "Supervisor,
 # Remote Operations" in Bristol CT is an on-site broadcast job, not WFH. Bare
 # country labels ("United States"/"USA"/"nationwide") are NOT remote either — a
 # US-wide posting is often on-site-TBD — so they route to the judge as unknown.
 # (Remote detection is inlined in classify_location below.)
 
-# Non-CA US states (CA excluded on purpose). Abbreviations are matched only as a
-# comma-delimited segment ("Jay, OK") to avoid colliding with words like "in" /
-# "or"; full state names are matched as substrings (low collision risk).
-_US_STATE_ABBR_NON_CA = {
-    "al", "ak", "az", "ar", "co", "ct", "de", "fl", "ga", "hi", "id", "il",
-    "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo",
-    "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or",
-    "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi",
-    "wy", "dc",
-}
-_US_STATE_NAMES_NON_CA = {
-    "alabama", "alaska", "arizona", "arkansas", "colorado", "connecticut",
-    "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana",
-    "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
-    "massachusetts", "michigan", "minnesota", "mississippi", "missouri",
-    "montana", "nebraska", "nevada", "new hampshire", "new jersey",
-    "new mexico", "new york", "north carolina", "north dakota", "ohio",
-    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
-    "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
-    "washington", "west virginia", "wisconsin", "wyoming",
-}
 # Non-US regions/cities — a "remote" role restricted to one of these is NOT
 # actionable (the candidate needs US-based remote). High-precision, kept short.
 _FOREIGN_MARKERS = {
@@ -189,35 +259,97 @@ _FOREIGN_MARKERS = {
 }
 
 
-def _has_non_ca_us_state(loc: str, parts: list) -> bool:
-    """True if the location names a concrete non-CA US state (name or abbrev)."""
-    if any(name in loc for name in _US_STATE_NAMES_NON_CA):
-        return True
-    return any(p in _US_STATE_ABBR_NON_CA for p in parts)
+def _tokens(text: str) -> set:
+    return set(re.split(r"[^a-z.]+", text))
+
+
+def _states_named(text: str):
+    """(home, other, codes, names) for a lower-cased location: whether it names
+    the home state, whether it names another US state, the state codes it
+    names, and the codes of the states it names in full. Names match as
+    substrings, codes as a comma-delimited segment; the home code also matches
+    as a loose word unless it is an ordinary word."""
+    dc = bool(_DC_RE.search(text))
+    t = _DC_RE.sub(" ", text) if dc else text
+    parts = [p.strip() for p in t.split(",")]
+    names = {_US_STATE_NAME_TO_CODE[m] for m in _STATE_NAME_RE.findall(t)}
+    codes = names | {p for p in parts if p in _US_STATE_CODES} | ({"dc"} if dc else set())
+    home = bool(HOME_STATE_CODE) and (
+        HOME_STATE_CODE in codes
+        or (HOME_STATE_CODE not in _WORDLIKE_STATE_CODES and HOME_STATE_CODE in _tokens(t)))
+    other = bool(codes - {HOME_STATE_CODE})
+    return home, other, codes, names
+
+
+def _has_other_us_state(loc: str, parts: list = None) -> bool:
+    """True if the location names a concrete US state other than the home state."""
+    return _states_named(loc)[1]
+
+
+def _names_state(text: str, code: str) -> bool:
+    """True if a lower-cased location names the given state (code or name)."""
+    home, _other, codes, _names = _states_named(text)
+    if code == HOME_STATE_CODE:
+        return home
+    return code in codes or (code not in _WORDLIKE_STATE_CODES and code in _tokens(text))
+
+
+def _bare_term_in(term: str, text: str) -> bool:
+    # Short terms ("sea", "pdx") must be a whole word, longer ones may be a substring.
+    return (term in text) if len(term) > 3 else (term in _tokens(text))
+
+
+def _metro_hit(parsed_terms, segments) -> bool:
+    """True when any location option names one of the metro's places.
+
+    A term written with its state needs that state in the same option. A bare
+    term does not count where the option names a state outside the metro
+    states ("Everett, MA", "Portland, ME") or another country ("Kirkland, QC,
+    Canada"); the term's own words are taken out before that check, so a term
+    that contains a state or city name ("vancouver", "kansas city") still
+    counts on its own."""
+    for seg in segments:
+        for town, st in parsed_terms:
+            if not _bare_term_in(town, seg):
+                continue
+            if st:
+                if _names_state(seg, st):
+                    return True
+                continue
+            rest = seg.replace(town, " ") if len(town) > 3 else re.sub(
+                rf"\b{re.escape(town)}\b", " ", seg)
+            home, _other, codes, _names = _states_named(rest)
+            if home or codes & _METRO_STATES:
+                return True
+            if codes or any(f in rest for f in _FOREIGN_MARKERS):
+                continue
+            return True
+    return False
 
 
 # Location feedback loop guard: a single "wrong location"
 # dismissal must not block a whole area. A location string is blocked only
 # when it names a specific place outside the candidate's area (these
-# classify_location classes — never 'bay', 'remote' or 'unknown': a bare
+# classify_location classes — never 'primary', 'remote' or 'unknown': a bare
 # "United States" or "Hybrid" label would block every nationwide and every
 # hybrid posting) AND it was dismissed for location at least this many times.
-# Never "la" either: secondary-metro on-site roles are a lower priority but
+# Never "secondary" either: secondary-metro on-site roles are a lower priority but
 # must stay visible — they are already capped to Worth a look, never hidden.
-LOCATION_SUPPRESSIBLE_CLASSES = ("ca", "reject")
+LOCATION_SUPPRESSIBLE_CLASSES = ("home_state", "reject")
 # Votes are counted per DAY: a batch dismissal, or the same job seen on two
 # sites and dismissed together, is still saying it once.
 LOCATION_SUPPRESS_MIN_VOTES = 2
-# A bare state / country label is never a place to block ("California",
-# "CA, US", "United States") — it would drop every statewide posting.
-_REGION_ONLY_LABELS = {"ca", "california", "us", "usa", "u.s.", "united states",
-                       "united states of america"}
+# A bare home-state or country label is never a place to block ("Washington",
+# "WA, US", "United States" for a Washington profile) — it would drop every
+# statewide posting.
+_REGION_ONLY_LABELS = ({"us", "usa", "u.s.", "united states", "united states of america"}
+                       | ({HOME_STATE_CODE, HOME_STATE_NAME} - {""}))
 
 
 def location_is_suppressible(location: str) -> bool:
     """True when a location string may be blocked by the feedback loop: a
     specific place outside the candidate's area (LOCATION_SUPPRESSIBLE_CLASSES), not a bare
-    state / country label."""
+    home-state / country label."""
     loc = str(location or "").strip().lower()
     segments = [seg.strip() for seg in loc.split(",") if seg.strip()]
     if not segments or all(seg in _REGION_ONLY_LABELS for seg in segments):
@@ -229,36 +361,35 @@ def classify_location(location: str = "", title: str = "") -> str:
     """Classify a job location relative to the profile's home area
     (search.locations). Returns one of:
 
-    - ``bay``     the profile's primary metro — top priority
-    - ``remote``  remote, US or unspecified region — actionable
-    - ``la``      the profile's secondary metro, on-site — capped, NOT rejected
-    - ``ca``      other California on-site — actionable-ish, passes to the judge
-    - ``unknown`` empty, or a bare national label — no signal, passes to judge
-    - ``reject``  concrete non-CA place, or remote restricted to a non-US region
+    - ``primary``     the profile's primary metro — top priority
+    - ``remote``      remote, US or unspecified region — actionable
+    - ``secondary``   the profile's secondary metro, on-site — capped, NOT rejected
+    - ``home_state``  elsewhere in the profile's home state, on-site — passes to the judge
+    - ``unknown``     empty, or a bare national label — no signal, passes to judge
+    - ``reject``      a concrete place in another US state or country, or remote
+                      restricted to a non-US region
 
     Remote is read from the LOCATION only, never the title.
     """
-    import re as _re
     loc = str(location or "").lower().strip()
     if not loc or loc == "none":
         return "unknown"
-    tokens = set(_re.split(r"[^a-z.]+", loc))
-    parts = [p.strip() for p in loc.split(",")]
-
-    def _hit(terms):
-        return any((t in loc) if len(t) > 3 else (t in tokens) for t in terms)
+    tokens = _tokens(loc)
+    segments = [s.lower() for s in _location_segments(loc)] or [loc]
 
     # The primary metro wins outright (on-site near home is the top preference).
-    if _hit(PRIMARY_METRO_TERMS):
-        return "bay"
-    if ("ca" in tokens or "california" in loc) and any(t in loc for t in BAY_AREA_CA_TERMS):
-        return "bay"
+    if _metro_hit(_PRIMARY_PARSED, segments):
+        return "primary"
 
     remote = ("remote" in tokens) or ("work from home" in loc) or ("anywhere" in tokens)
     foreign = any(f in loc for f in _FOREIGN_MARKERS)
-    non_ca_state = _has_non_ca_us_state(loc, parts)
+    home_state, other_state, _codes, named = _states_named(loc)
+    home_name = bool(HOME_STATE_CODE) and HOME_STATE_CODE in named
+    # The home state is a US signal too, except a home code that is also a
+    # country code ("CA" is Canada on many boards).
+    home_us = home_name or (home_state and HOME_STATE_CODE not in _STATE_CODES_ALSO_COUNTRIES)
     us_signal = (any(lbl in loc for lbl in ("united states", "usa", "u.s."))
-                 or "us" in tokens or non_ca_state)
+                 or "us" in tokens or other_state or home_us)
 
     if remote:
         # Remote is fine UNLESS pinned to a non-US region with no US signal
@@ -268,28 +399,27 @@ def classify_location(location: str = "", title: str = "") -> str:
         return "remote"
 
     # On-site from here down. The secondary metro is capped elsewhere, never rejected.
-    # Bare "la" == Los Angeles; "Lake Charles, LA" (Louisiana) is caught below.
-    if _hit(SECONDARY_METRO_TERMS) or loc == "la":
-        return "la"
-    if ("ca" in tokens or "california" in loc) and any(t in loc for t in LA_METRO_CA_TERMS):
-        return "la"
+    if _metro_hit(_SECONDARY_PARSED, segments) or (
+            SECONDARY_METRO_ABBREV and loc == SECONDARY_METRO_ABBREV):
+        return "secondary"
 
-    # A California option ANYWHERE makes the role actionable, even in a multi-
-    # location posting ("Austin, TX; Novato, California; Seattle, WA") — so check
-    # CA before rejecting on a co-listed non-CA state. "california" (unambiguous)
-    # is checked before a foreign locale; a bare "ca" token (could be Canada) is
-    # checked after, so "Vancouver, CA" still rejects as foreign.
-    if "california" in loc:
-        return "ca"
+    # A home-state option ANYWHERE makes the role actionable, even in a multi-
+    # location posting ("Austin, TX; Spokane, Washington; Denver, CO") — so check
+    # the home state before rejecting on a co-listed other state. The state's
+    # name (unambiguous) is checked before a foreign locale; its bare code (which
+    # may be a country code, "DE" = Germany) is checked after, so "Berlin, DE"
+    # still rejects as foreign for a profile whose home state is Delaware.
+    if home_name:
+        return "home_state"
     # A foreign locale hard-rejects only when there's NO US option — a
     # multi-country posting that also offers the US ("CA - Canada; US") should
-    # pass to the judge, not be silently hidden. A concrete non-CA US state
+    # pass to the judge, not be silently hidden. A concrete other US state
     # still rejects even with a US label (on-site Denver is not actionable).
     if foreign and not us_signal:
         return "reject"
-    if "ca" in tokens:
-        return "ca"
-    if non_ca_state:
+    if home_state:
+        return "home_state"
+    if other_state:
         return "reject"
 
     # Bare national label ("United States") or an unrecognized string — no firm
@@ -320,21 +450,22 @@ def _location_segments(location: str):
 def extract_actionable_location(location: str = ""):
     """For a MULTI-location posting where one in-area option is what makes
     the role actionable, return that segment so the reader can see WHICH location
-    is the right one (e.g. "Austin, TX; Novato, California; Seattle, WA" →
-    "Novato, California"). Returns None for single-location strings or when
-    there is nothing to disambiguate (all in-area, or no in-area option). The
-    primary metro ("bay") is preferred over other CA, which is preferred over
-    the secondary metro ("la")."""
+    is the right one (e.g. for a Washington profile "Austin, TX; Spokane,
+    Washington; Denver, CO" → "Spokane, Washington"). Returns None for
+    single-location strings or when there is nothing to disambiguate (all
+    in-area, or no in-area option). The primary metro ("primary") is preferred over
+    the rest of the home state ("home_state"), which is preferred over the
+    secondary metro ("secondary")."""
     segments = _location_segments(location)
     if len(segments) < 2:
         return None
-    has_non_ca = any(
-        classify_location(s) not in ("bay", "la", "ca", "remote") for s in segments)
-    if not has_non_ca:
-        return None  # all options are already CA/remote — nothing to flag
-    for pref in ("bay", "ca", "la"):
+    has_out_of_area = any(
+        classify_location(s) not in ("primary", "secondary", "home_state", "remote") for s in segments)
+    if not has_out_of_area:
+        return None  # all options are already in-area/remote — nothing to flag
+    for pref in ("primary", "home_state", "secondary"):
         for s in segments:
-            # Guard against a JD blob that happens to contain "california": a real
+            # Guard against a JD blob that happens to name the home state: a real
             # location segment is short. Skip anything implausibly long.
             if classify_location(s) == pref and len(s) <= 60:
                 return s
@@ -343,10 +474,10 @@ def extract_actionable_location(location: str = ""):
 
 def _normalize_location_segment(seg: str) -> str:
     """Canonicalize one location segment so the SAME place written differently
-    compares equal: "Los Angeles, CA" == "Los Angeles, CA, US" ==
-    "Los Angeles, California" == "Los Angeles, CA (Hybrid)". Drops parentheticals
-    and trailing US country labels, canonicalizes "California"→"ca", normalizes
-    comma/space. (Without this, exact-segment matching under-suppresses — a stored
+    compares equal: "Spokane, WA" == "Spokane, WA, US" == "Spokane, Washington"
+    == "Spokane, WA (Hybrid)" for a Washington profile. Drops parentheticals and
+    trailing US country labels, writes the home state's name as its code,
+    normalizes comma/space. (Without this, exact-segment matching under-suppresses — a stored
     key would leak the ~half of postings that carry a ", US" suffix.)"""
     import re as _re
     s = str(seg or "").strip().lower()
@@ -354,7 +485,8 @@ def _normalize_location_segment(seg: str) -> str:
         return ""
     s = _re.sub(r"\s*\([^)]*\)", "", s)              # drop "(hybrid)", "(remote)"
     s = _re.sub(r"\s*,\s*", ", ", s)                  # normalize comma spacing
-    s = _re.sub(r"\bcalifornia\b", "ca", s)           # canonicalize CA
+    if HOME_STATE_NAME:                               # home state name -> its code
+        s = _re.sub(rf"\b{_re.escape(HOME_STATE_NAME)}\b", HOME_STATE_CODE, s)
     # strip a trailing US country label (", US" / ", USA" / ", United States[ of America]")
     s = _re.sub(r",\s*(?:united states of america|united states|u\.?s\.?a?\.?|usa|us)\s*$", "", s)
     s = _re.sub(r"\s+", " ", s).strip().strip(",").strip()
@@ -364,10 +496,10 @@ def _normalize_location_segment(seg: str) -> str:
 def is_location_suppressed(location: str, suppressed) -> bool:
     """True if a job at ``location`` should be dropped given ``suppressed`` — the
     set of no-go location strings the candidate dismissed. Compares NORMALIZED segments
-    (so "Los Angeles, CA" == "Los Angeles, CA, US"), never bare substrings (a
+    (so "Spokane, WA" == "Spokane, WA, US"), never bare substrings (a
     stored "la" must not drop "Atlanta"), and only drops when EVERY actionable
     segment is suppressed, so a multi-location posting that still offers a
-    non-suppressed CA/remote option is kept."""
+    non-suppressed in-area/remote option is kept."""
     if not suppressed:
         return False
     supp = {_normalize_location_segment(s) for s in suppressed if s and str(s).strip()}
@@ -384,20 +516,20 @@ def is_location_suppressed(location: str, suppressed) -> bool:
         return False
     norm = [_normalize_location_segment(s) for s in segments]
     actionable = [n for n, s in zip(norm, segments)
-                  if classify_location(s) in ("bay", "remote", "la", "ca")]
+                  if classify_location(s) in ("primary", "remote", "secondary", "home_state")]
     candidates = actionable or norm
     return all(n in supp for n in candidates)
 
 
 def location_priority(location: str = "", title: str = "") -> int:
-    """0 = primary metro, 1 = remote, 2 = unknown/other/CA, 3 = secondary-metro on-site.
+    """0 = primary metro, 1 = remote, 2 = unknown/other/home state, 3 = secondary-metro on-site.
 
     Thin wrapper over ``classify_location`` (the single source of truth) for the
     call sites that tier by integer. A ``reject`` maps to 2 here — the pre-filter
     already drops rejects before the cascade, so this only matters for exempt
     USER_INPUT rows, which should stay visible.
     """
-    return {"bay": 0, "remote": 1, "la": 3}.get(
+    return {"primary": 0, "remote": 1, "secondary": 3}.get(
         classify_location(location, title), 2)
 
 

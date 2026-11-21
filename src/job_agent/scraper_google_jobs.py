@@ -71,8 +71,7 @@ _ATS_HOSTS = (
 # ("Monster Energy" + monster.com, "24 Seven Talent" + talent.com — both
 # confirmed leaks in the 2026-07-05 adversarial review).
 _AGGREGATOR_CORES = frozenset((
-    "monster", "talent", "tealhq", "builtin", "builtinchicago", "builtinnyc",
-    "builtinla", "builtinsf", "dice", "career", "careers", "whatjobs",
+    "monster", "talent", "tealhq", "builtin", "dice", "career", "careers", "whatjobs",
     "jobleads", "mediabistro", "lensa", "care", "jooble", "bebee",
     "learn4good", "hollylist", "jobzmall", "localjobs", "remotejobs",
     "diversityjobs", "edtechjobs", "sonicjobs", "recruit", "linkedin",
@@ -156,7 +155,9 @@ def is_employer_grade(url: str, company: str) -> bool:
     core = _registrable_core(url)
     # Known boards are denied BEFORE company matching: a name collision
     # ("Monster Energy" + monster.com) must never self-certify a board.
-    if core in _AGGREGATOR_CORES:
+    # Built In runs one site per metro (builtinseattle.com, builtinnyc.com,
+    # ...): every builtin* domain is the same board.
+    if core in _AGGREGATOR_CORES or core.startswith("builtin"):
         return False
     if _is_ats_host(host, path):
         return True

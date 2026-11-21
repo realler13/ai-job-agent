@@ -261,13 +261,18 @@ def apple_level_line(level: str) -> str:
     jargon, so the line carries a short key to it — and the configured target
     band (cascade_filter.APPLE_TARGET_BAND, the single source), so every judge
     reads the same rule the cascade applies in code
-    (cascade_filter.apple_level_verdict)."""
-    from .cascade_filter import APPLE_TARGET_BAND  # lazy: avoids an import cycle
+    (cascade_filter.apple_level_verdict). A profile with no band turns that
+    rule off; the line then carries the level and the key, and no band."""
+    # lazy: avoids an import cycle
+    from .cascade_filter import APPLE_TARGET_BAND, APPLE_TARGET_HIGH, APPLE_TARGET_LOW
+    key = "Apple IC ladder: 2 entry, 3 mid, 4 senior, 5 staff, 6 principal"
+    if None in (APPLE_TARGET_BAND, APPLE_TARGET_LOW, APPLE_TARGET_HIGH):
+        return f"Apple job level: {level} ({key}; MGR is the people-manager ladder)"
     band = APPLE_TARGET_BAND
-    return (f"Apple job level: {level} (Apple IC ladder: 2 entry, 3 mid, "
-            f"4 senior, 5 staff, 6 principal; the candidate's target band is "
-            f"{band} / {band.replace('IC', 'ICT')} — IC4 is above it, IC1 and the MGR "
-            f"people-manager ladder are outside it)")
+    below = f"IC{APPLE_TARGET_LOW - 1} and below and " if APPLE_TARGET_LOW > 1 else ""
+    return (f"Apple job level: {level} ({key}; the candidate's target band is "
+            f"{band} / {band.replace('IC', 'ICT')} — IC{APPLE_TARGET_HIGH + 1} is above it, "
+            f"{below}the MGR people-manager ladder are outside it)")
 
 
 def _fetch_apple_detail_fields(url: str, timeout: int = 15) -> dict:

@@ -13,6 +13,7 @@
 #   paths                where your resume / base CV / notes live
 #   search               locations, keywords, exclusions, staleness
 #   metrics_text         the ONLY numbers generators may use
+#   letter_template      the fallback cover letter, restating metrics_text
 #   rules                the judgement policy, in plain English
 #   application_answers  boilerplate for application forms
 #   domains              one base-CV variant per keyword category
@@ -51,9 +52,11 @@ paths:
 search:
   # primary_metro_terms -> the classifier's top class, secondary_metro_terms ->
   # its capped class (on-site there is shown as "worth a look" at most).
-  # The "rest of the home state" branch of config.classify_location is written
-  # for the market the tool was first tuned for; state_code / state_name are
-  # informational until that branch reads them.
+  # A town whose name also exists elsewhere is written with its state
+  # ("vancouver, wa") and then counts only next to that state. state_code /
+  # state_name are the home state: on-site elsewhere in it passes to the judge,
+  # other states are dropped. A bare metro term also counts in any state named
+  # under `allowed` (oregon / or for the Portland metro).
   locations:
     home: Seattle, WA
     primary_metro_label: Seattle metro
@@ -94,8 +97,19 @@ search:
   comp_floor_secondary_metro: 100000
   comp_floor_note: A role whose pay CEILING falls under the floor is dropped. On-site roles
     in the secondary metro must clear a higher floor. Unstated pay is never penalised.
-    These two values mirror the tool defaults in comp_utils.py, which holds the floors
-    that are actually applied.
+    These two values are the floors that are applied; comp_utils.py falls back to the
+    same numbers when a profile leaves them out.
+  # Apple publishes an internal level on its job pages (IC2 entry, IC3 mid,
+  # IC4 senior, IC5 staff; MGR = people managers). The cascade keeps a level
+  # inside this band, caps one level above it at "worth a look", and rejects
+  # anything lower, two or more levels above, or on the MGR ladder. Optional,
+  # with no default: leave it out and the Apple level rule is off.
+  apple_target_band:
+    low: 3
+    high: 4
+  # Built In has a site per metro: check the address opens before adding one (no key = no Built In).
+  builtin_sites:
+  - https://www.builtinseattle.com
   # Postings older than this are dropped before grading (the Review list shows
   # nothing older than 7 days anyway).
   stale_posting_days: 7
@@ -249,6 +263,45 @@ metrics_text: 'VERIFIED METRICS (use only these numbers — never invent others)
 
 
   Tooling: Final Cut Pro, DaVinci Resolve, Asana, Airtable, Pro Tools.'
+# The fallback cover letter (docs_builder.templated_letter) ships when the
+# letter check is unavailable or the posting has no text. Every number in it
+# must restate metrics_text above; a sentence whose number is not there, or
+# that repeats a stale years figure, is dropped when the letter is built.
+# Past tense, no employer names. proofs_by_domain picks 2-3 proofs per CV
+# domain (see `domains`), strongest first; a domain not listed uses
+# producer_core's.
+letter_template:
+  opening: I am a hands-on producer who plans, budgets, schedules and delivers video and
+    branded content.
+  proofs:
+    recent_episodes: In my most recent role, I delivered 120+ episodes across three
+      documentary and branded series.
+    recent_schedule: In my most recent role, I cut the post schedule from 6 to 4 weeks per
+      episode.
+    recent_crew: 'In my most recent role, I booked 20+ freelance crew and post contributors
+      each season: editors, sound and colourists.'
+    recent_budget: In my most recent role, I owned a $250K annual production budget and
+      reconciled it monthly.
+    broadcast_programmes: As a producer in public broadcasting, I produced 3 weekly studio
+      programmes end to end, and two of them were renewed for a third season.
+    broadcast_crews: As a producer in public broadcasting, I ran location shoots with 9-person
+      crews and handled full vendor and location negotiation.
+    freelance_shoots: As a freelance producer and production manager, I delivered 30+
+      commercial and non-profit shoots.
+    freelance_post: As a freelance producer and production manager, I supervised
+      post-production for a 6-part docuseries.
+  proofs_by_domain:
+    producer_core: [recent_episodes, broadcast_programmes, freelance_shoots]
+    live_and_experiential: [broadcast_crews, broadcast_programmes, freelance_shoots]
+    production_ops_and_management: [recent_schedule, recent_budget, broadcast_crews]
+    project_and_program_management: [recent_crew, recent_budget, freelance_post]
+    podcast_and_audio: [broadcast_programmes, recent_episodes, recent_crew]
+    youtube_and_creators: [recent_episodes, recent_schedule, recent_crew]
+    games_production: [recent_schedule, recent_crew, recent_budget]
+    production_admin: [recent_crew, recent_budget, broadcast_crews]
+  # Used when no proof above survives the checks. No numbers.
+  fallback_proof: In my recent roles, I planned, budgeted and delivered productions end to
+    end and kept crews and vendors on schedule.
 rules:
   candidate_summary: >-
     The candidate is a hands-on PRODUCER — a mid-level individual contributor in video,

@@ -1,5 +1,10 @@
 """
-Built In scraper — tech/media jobs from Built In's regional sites (see REGIONS).
+Built In scraper — tech/media jobs from Built In's regional sites.
+
+Built In runs one site per metro (builtinseattle.com, builtinnyc.com, ...).
+Which ones to scrape is the candidate's market, so it comes from the profile
+(``search.builtin_sites``, see candidate_profile.builtin_sites); a profile
+without the key scrapes no Built In site at all.
 
 Built In's regional subdomains serve server-rendered HTML. No auth wall,
 no Cloudflare. Keyword search via `?search=X`, pagination via `?page=N`.
@@ -24,15 +29,56 @@ import requests
 from bs4 import BeautifulSoup
 
 from .ats_scraper import _matches_keywords
+from .candidate_profile import builtin_sites
+from .config import PRIMARY_METRO_TERMS, SECONDARY_METRO_TERMS, _parse_metro_term
 
 logger = logging.getLogger(__name__)
 
-# Sample regions (the scraper's first test sites). Built In has a site per
-# metro: add or swap in your own here.
-REGIONS = {
-    "la": "https://www.builtinla.com",
-    "sf": "https://www.builtinsf.com",
-}
+
+
+def regions_from_sites(sites) -> dict[str, str]:
+    """{short key: base URL} for the given Built In base URLs.
+
+    The key is the metro part of the host ("https://www.builtinseattle.com"
+    -> "seattle"; the national "https://builtin.com" -> "builtin"); a key
+    already taken falls back to the full host.
+    """
+    regions: dict[str, str] = {}
+    for base in sites:
+        host = base.split("://", 1)[-1].split("/", 1)[0]
+        label = host[4:] if host.startswith("www.") else host
+        key = label.split(".", 1)[0][len("builtin"):] or "builtin"
+        if key in regions:
+            key = host
+        regions[key] = base
+    return regions
+
+
+def location_hints(primary_terms, secondary_terms) -> tuple[str, ...]:
+    """The place names a card's text is scanned for, in priority order.
+
+    The profile's primary then secondary metro terms, title-cased (a term
+    written with its state, "vancouver, wa", contributes the town:
+    "Vancouver"), then "Remote" and "Hybrid". Each name appears once.
+    """
+    hints: list[str] = []
+    for term in list(primary_terms or ()) + list(secondary_terms or ()):
+        if not str(term or "").strip():
+            continue
+        town, _state = _parse_metro_term(term)
+        hint = town.title()
+        if hint and hint not in hints:
+            hints.append(hint)
+    for tag in ("Remote", "Hybrid"):
+        if tag not in hints:
+            hints.append(tag)
+    return tuple(hints)
+
+
+#: {short key: base URL} — the profile's search.builtin_sites (empty = off).
+REGIONS = regions_from_sites(builtin_sites())
+#: Place names stashed as a card's location (first match wins).
+LOCATION_HINTS = location_hints(PRIMARY_METRO_TERMS, SECONDARY_METRO_TERMS)
 REQUEST_TIMEOUT = 20
 INTER_REQUEST_DELAY = 1.0
 
@@ -110,11 +156,9 @@ def _parse_card(card, base_url: str) -> dict | None:
     # pipeline already has a location pre-filter, so we stash whatever short
     # chunk mentions the city.
     location = ""
-    # Simple heuristic: grab text near known city tokens for the sample regions
-    # (extend the tuple when you add a region).
-    for hint in ("Los Angeles", "Hollywood", "Santa Monica", "Culver City", "Burbank",
-                 "Pasadena", "San Francisco", "Bay Area", "Oakland", "Berkeley",
-                 "Palo Alto", "San Jose", "Mountain View", "Remote", "Hybrid"):
+    # Simple heuristic: the first of the profile's metro place names (then
+    # Remote / Hybrid) that the card text mentions — see LOCATION_HINTS.
+    for hint in LOCATION_HINTS:
         if hint in card_text:
             location = hint
             break
@@ -209,8 +253,12 @@ def scrape_builtin(keywords: list[str], max_pages: int = 3) -> list[dict]:
         max_pages: Pages per region per keyword (default 3 → up to ~75 jobs).
 
     Returns:
-        Deduplicated list of job dicts.
+        Deduplicated list of job dicts; [] (and no request) when the profile
+        names no Built In site.
     """
+    if not REGIONS:
+        logger.info("Built In: skipped (no search.builtin_sites in the profile)")
+        return []
     all_jobs: list[dict] = []
     seen_urls: set[str] = set()
 

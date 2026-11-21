@@ -146,16 +146,14 @@ versioned alongside your profile. The shipped example encodes a creative-
 production search; rewriting it for a different field is a text edit, not a
 code change.
 
-**Location rules were first tuned for California metros.** The profile
-supplies your home location, the primary and secondary metro terms and the
-allowed-location list, and the example profile shows how to point them
-elsewhere (Seattle and Portland). The classifier underneath still carries
-its original shape: its internal class names (`bay`, `la`) and a few helper
-lists for ambiguous California place names are from the market it was first
-built for. They are identifiers, not a statement about where you live, but if
-your metros are far from that shape, read `classify_location` in
-`src/job_agent/config.py` before trusting the location gate. The pay floors
-are constants in `src/job_agent/comp_utils.py`.
+**Location rules come from the profile.** The profile supplies your home
+location and state, the primary and secondary metro terms, the
+allowed-location list and the two pay floors; the example profile points
+them at Seattle and Portland. A posting in your primary metro ranks first,
+remote second, the rest of your home state goes to the judge, and other
+states and countries are dropped. A town name that also exists elsewhere is
+written with its state (`vancouver, wa`) and then counts only next to that
+state.
 
 See [docs/CONFIGURING.md](docs/CONFIGURING.md) for the field-by-field guide.
 

@@ -22,6 +22,7 @@ from .cv_tailor import (_strip_markdown, _load_transcript_context, grade_cv_qual
                         _ATTRIBUTION_LOCK, _ANTI_SLOP_RULES, estimate_docx_pages,
                         check_keyword_coverage, _norm_ws, grade_cover_letter_truth)
 from . import cv_facts
+from .candidate_profile import letter_template as profile_letter_template
 from .company_deriver import display_company
 from .jd_sanitizer import sanitize_jd, clean_jd, leaked_trap_tokens, UNTRUSTED_JD_CLAUSE
 # .utils get_google_credentials import removed (Drive doc-upload retired)
@@ -1257,46 +1258,66 @@ def _contact_links(base_cv_path) -> list:
 
 
 # --- Templated letter ---------------------------------------------------------
-# The known-good fallback. The sentences below are DATA, not logic: they restate
-# the FICTIONAL example profile (profiles/example.yaml). Every proof sentence
-# restates one or two lines of that profile's metrics_text (past tense, no
-# employer name). When you replace the profile, replace these sentences with
-# your own verified facts: the tests check every number in them against
-# METRICS_BANK_TEXT and the stale-claim list, so a profile swap that leaves
-# them behind fails there instead of reaching an employer.
-_TEMPLATE_OPENING = ("I am a hands-on producer who plans, budgets, schedules and delivers "
-                     "video and branded content.")
+# The known-good fallback. Its sentences are DATA from the candidate profile
+# (letter_template: opening, proofs, proofs_by_domain, fallback_proof; see
+# candidate_profile.letter_template), never text written into this module:
+# a fallback that tells someone else's story, or a number no source
+# supports, would reach an employer exactly when the letter check is down.
+# Each proof restates one or two lines of the profile's metrics_text (past
+# tense, no employer name). templated_letter still re-checks every sentence
+# against METRICS_BANK_TEXT and the stale-claim list and drops a failing one,
+# so a profile edit that leaves a proof behind costs a sentence, not the truth.
+_LETTER_TEMPLATE = profile_letter_template()
+# A profile with no letter_template gets this short, number-free letter.
+_GENERIC_OPENING = "My experience lines up closely with the work this role describes."
+_GENERIC_PROOF = ("In my recent roles, I took projects from plan to delivery and kept the "
+                  "people and vendors involved on schedule.")
+_TEMPLATE_OPENING = _LETTER_TEMPLATE["opening"] or _GENERIC_OPENING
 _TEMPLATE_CLOSE = ("My CV with the full details of this work is attached. "
                    "Thank you for your time and consideration.")
-_TEMPLATE_PROOFS = {
-    "recent_pipeline": ("In my most recent role, I ran a pipeline of 6 videos weekly from brief to "
-                        "publish and delivered 120+ episodes across three series."),
-    "recent_team": ("In my most recent role, I coordinated 20+ cross-functional contributors: "
-                    "editors, motion designers, sound, colourists and voice talent."),
-    "recent_budget": ("In my most recent role, I owned a $250K annual production budget and "
-                      "reconciled it monthly."),
-    "broadcast_programmes": ("As a producer in public broadcasting, I produced 3 weekly studio "
-                             "programmes end to end."),
-    "broadcast_audience": ("As a producer in public broadcasting, I worked on programmes whose "
-                           "local audience share grew 18% over two seasons."),
-    "broadcast_crews": ("As a producer in public broadcasting, I ran location shoots with "
-                        "15-person crews and handled full vendor and location negotiation."),
-    "freelance_shoots": ("As a freelance producer and production manager, I delivered 30+ "
-                         "commercial and non-profit shoots."),
-    "freelance_post": ("As a freelance producer and production manager, I supervised "
-                       "post-production for a 6-part docuseries."),
-}
-# 2-3 lead proofs per routed domain (DOMAIN_CV_MAP keys), strongest first.
-_TEMPLATE_PROOFS_BY_DOMAIN = {
-    "producer_core": ("recent_pipeline", "broadcast_programmes", "freelance_shoots"),
-    "live_and_experiential": ("broadcast_crews", "broadcast_programmes", "freelance_shoots"),
-    "production_ops_and_management": ("recent_pipeline", "recent_budget", "broadcast_crews"),
-    "project_and_program_management": ("recent_team", "recent_budget", "freelance_post"),
-    "podcast_and_audio": ("broadcast_programmes", "recent_pipeline", "recent_team"),
-    "youtube_and_creators": ("recent_pipeline", "broadcast_audience", "recent_team"),
-    "games_production": ("recent_pipeline", "recent_team", "recent_budget"),
-    "production_admin": ("recent_team", "recent_budget", "broadcast_crews"),
-}
+#: {name: sentence}, as the profile writes them.
+_TEMPLATE_PROOFS = _LETTER_TEMPLATE["proofs"]
+#: {domain: (names...)}: 2-3 lead proofs per routed domain (DOMAIN_CV_MAP keys), strongest first.
+_TEMPLATE_PROOFS_BY_DOMAIN = _LETTER_TEMPLATE["proofs_by_domain"]
+_TEMPLATE_FALLBACK_PROOF = _LETTER_TEMPLATE["fallback_proof"] or _GENERIC_PROOF
+# The routing default (config.resolve_cv_domain): its proofs serve a domain
+# the profile does not list.
+_TEMPLATE_DEFAULT_DOMAIN = "producer_core"
+
+
+def _template_problems(sentence: str) -> list:
+    """Numbers in *sentence* that METRICS_BANK_TEXT does not carry, plus any
+    stale claim. Empty = safe to ship in the fallback letter."""
+    return cv_facts.check_numbers(sentence, [METRICS_BANK_TEXT]) + cv_facts.forbidden_hits(sentence)
+
+
+def _template_opening() -> str:
+    problems = _template_problems(_TEMPLATE_OPENING)
+    if problems:
+        logging.warning(f"Templated letter: profile opening dropped ({', '.join(problems)})")
+        return _GENERIC_OPENING
+    return _TEMPLATE_OPENING
+
+
+def _template_proofs(domain: str) -> list:
+    """The routed domain's proof sentences that pass the checks; the
+    fallback proof (or the generic one) when none does."""
+    names = (_TEMPLATE_PROOFS_BY_DOMAIN.get(domain)
+             or _TEMPLATE_PROOFS_BY_DOMAIN.get(_TEMPLATE_DEFAULT_DOMAIN)
+             or tuple(_TEMPLATE_PROOFS)[:3])
+    kept = []
+    for name in names:
+        sentence = _TEMPLATE_PROOFS.get(name, "")
+        problems = _template_problems(sentence)
+        if sentence and not problems:
+            kept.append(sentence)
+        elif sentence:
+            logging.warning(f"Templated letter: proof '{name}' dropped ({', '.join(problems)})")
+    if kept:
+        return kept
+    if not _template_problems(_TEMPLATE_FALLBACK_PROOF):
+        return [_TEMPLATE_FALLBACK_PROOF]
+    return [_GENERIC_PROOF]
 
 
 def _plain_title(job: dict) -> str:
@@ -1309,16 +1330,16 @@ def _plain_title(job: dict) -> str:
 
 def templated_letter(job: dict, domain: str, company_display: str) -> str:
     """The deterministic letter (salutation + 3 paragraphs, no signature): one
-    sentence naming the role and company, the one-line opening, the routed
-    domain's 2-3 lead proofs, and a plain close."""
+    sentence naming the role and company, the profile's one-line opening, the
+    routed domain's 2-3 lead proofs that pass the number and stale-claim
+    checks (a number-free proof when none does), and a plain close."""
     title = _plain_title(job)
     role = f"the {title} role" if title else "this role"
     at = f" at {company_display}" if company_display else ""
-    keys = _TEMPLATE_PROOFS_BY_DOMAIN.get(domain) or _TEMPLATE_PROOFS_BY_DOMAIN["producer_core"]
     return "\n".join([
         CL_SALUTATION,
-        f"I am writing to apply for {role}{at}. {_TEMPLATE_OPENING}",
-        " ".join(_TEMPLATE_PROOFS[k] for k in keys),
+        f"I am writing to apply for {role}{at}. {_template_opening()}",
+        " ".join(_template_proofs(domain)),
         _TEMPLATE_CLOSE,
     ])
 

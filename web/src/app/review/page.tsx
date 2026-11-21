@@ -580,9 +580,9 @@ export default function ReviewPage() {
                           {contractPayNote(job.employment_type, job.comp_text, job.company)}
                         </p>
                       )}
-                      {job.ca_highlight && (
+                      {job.home_state_highlight && (
                         <p className="mt-1 text-xs font-medium text-green-700 dark:text-green-500">
-                          {'\u2713'} Matching location: {job.ca_highlight}
+                          {'\u2713'} Matching location: {job.home_state_highlight}
                         </p>
                       )}
                       {!isExpanded && job.reasoning && (

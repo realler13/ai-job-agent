@@ -368,27 +368,50 @@ def llm_extract_comp(title: str, description: str, model: str = None) -> Optiona
 
 
 # Comp floor: a role whose KNOWN yearly pay ceiling sits below it leaves the
-# feed. Applies only when comp IS KNOWN — N/A rows unaffected.
-COMP_FLOOR_YEARLY = 50_000
+# feed. Applies only when comp IS KNOWN — N/A rows unaffected. Both floors are
+# read from the profile (search.comp_floor_yearly /
+# search.comp_floor_secondary_metro); these defaults apply when a profile
+# leaves a key out.
+_DEFAULT_COMP_FLOOR_YEARLY = 50_000
+_DEFAULT_COMP_FLOOR_SECONDARY_METRO = 100_000
+
+
+def _floor_from_profile(key: str, default: int) -> int:
+    """A yearly floor from the profile's search block, or the default when the
+    key is missing or empty. A value that is not a number fails loudly at
+    import rather than silently applying no floor."""
+    from .candidate_profile import SEARCH
+    value = SEARCH.get(key)
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        return int(float(str(value).replace(",", "").replace("_", "")))
+    except ValueError:
+        raise ValueError(f"search.{key} in the candidate profile must be a yearly "
+                         f"amount such as 60000, not {value!r}") from None
+
+
+COMP_FLOOR_YEARLY = _floor_from_profile("comp_floor_yearly", _DEFAULT_COMP_FLOOR_YEARLY)
 # ON-SITE roles in the profile's secondary metro (classify_location class
-# 'la') must clear a higher floor. Remote postings and multi-location postings
-# with a primary-metro option classify as 'remote'/'bay', so they keep the
-# base floor.
-COMP_FLOOR_LA_ONSITE = 100_000
+# 'secondary') must clear a higher floor. Remote postings and multi-location
+# postings with a primary-metro option classify as 'remote'/'primary', so they
+# keep the base floor.
+COMP_FLOOR_SECONDARY_METRO_ONSITE = _floor_from_profile(
+    "comp_floor_secondary_metro", _DEFAULT_COMP_FLOOR_SECONDARY_METRO)
 
 
 def floor_for_location(location) -> int:
     """The comp floor a job must clear to keep its tier, by location class."""
     from .config import classify_location
-    if classify_location(str(location or "")) == "la":
-        return COMP_FLOOR_LA_ONSITE
+    if classify_location(str(location or "")) == "secondary":
+        return COMP_FLOOR_SECONDARY_METRO_ONSITE
     return COMP_FLOOR_YEARLY
 
 
 def apply_comp_floor(db) -> int:
     """UNTIER tiered rows whose KNOWN yearly comp CEILING (top of the stated
     fork) sits below their location's floor (COMP_FLOOR_YEARLY; the higher
-    COMP_FLOOR_LA_ONSITE for secondary-metro on-site roles). Terminal, not a
+    COMP_FLOOR_SECONDARY_METRO_ONSITE for secondary-metro on-site roles). Terminal, not a
     one-tier demote: degrading strong -> worth_a_look would leave a role
     paying well under the floor VISIBLE in the digest (below threshold means
     gone). match_level kept, reasoning annotated — recoverable in the DB,
@@ -408,7 +431,7 @@ def apply_comp_floor(db) -> int:
             floor = floor_for_location(location)
             if ymax >= floor:
                 continue
-            why = ("secondary-metro on-site pays" if floor == COMP_FLOOR_LA_ONSITE
+            why = ("secondary-metro on-site pays" if floor == COMP_FLOOR_SECONDARY_METRO_ONSITE
                    else "posting pays")
             note = f" [Comp floor: {why} under ${floor // 1000}K/yr - removed from feed.]"
             conn.execute("UPDATE scrapes SET tier=NULL, reasoning=COALESCE(reasoning,'') || ? WHERE id=?",

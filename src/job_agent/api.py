@@ -175,15 +175,15 @@ def health():
 # === Jobs ===
 
 
-def _with_ca_highlight(jobs):
-    """Annotate each job with ``ca_highlight``: for a multi-location posting, the
+def _with_home_state_highlight(jobs):
+    """Annotate each job with ``home_state_highlight``: for a multi-location posting, the
     segment inside the candidate's target area that makes it actionable (so the
     candidate sees which of several listed locations is the right one). None
     when not applicable."""
     from .config import extract_actionable_location
     for j in jobs:
         if isinstance(j, dict):
-            j["ca_highlight"] = extract_actionable_location(j.get("location") or "")
+            j["home_state_highlight"] = extract_actionable_location(j.get("location") or "")
     return jobs
 
 
@@ -228,7 +228,7 @@ def list_jobs(
         """
         params.extend([limit, offset])
         cursor.execute(query, params)
-        rows = _with_ca_highlight([dict(r) for r in cursor.fetchall()])
+        rows = _with_home_state_highlight([dict(r) for r in cursor.fetchall()])
         conn.row_factory = None
 
         # Total count
@@ -261,7 +261,7 @@ def latest_session_jobs(include_irrelevant: bool = False):
         ]
 
     return {
-        "jobs": _with_ca_highlight(session_jobs),
+        "jobs": _with_home_state_highlight(session_jobs),
         "total": len(session_jobs),
         "session_id": session_id,
     }
@@ -276,7 +276,7 @@ def unreviewed_jobs():
     the feed's order and membership never depend on it — and a failure there
     never fails the feed. Jobs whose company board no longer lists them are
     already left out by get_unreviewed_jobs."""
-    rows = _with_ca_highlight(_db.get_unreviewed_jobs())
+    rows = _with_home_state_highlight(_db.get_unreviewed_jobs())
     try:
         reads = _feed_posting_reads(rows)
     except Exception as e:
@@ -355,7 +355,7 @@ def get_job(job_id: int):
         conn.row_factory = None
         if not row:
             raise HTTPException(status_code=404, detail="Job not found")
-        return _with_ca_highlight([dict(row)])[0]
+        return _with_home_state_highlight([dict(row)])[0]
     except HTTPException:
         raise
     except Exception as e:
