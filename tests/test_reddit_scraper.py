@@ -2,6 +2,7 @@
 
 PRAW is mocked throughout so tests don't hit Reddit's API.
 """
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -85,6 +86,24 @@ class TestRedditClient:
         monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
         monkeypatch.delenv("REDDIT_USER_AGENT", raising=False)
         assert _reddit_client() is None
+
+    def test_unconfigured_skips_quietly(self, monkeypatch, caplog):
+        # A source nobody set up is skipped on every run: the skip must not
+        # show up as a warning.
+        for var in ("REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USER_AGENT"):
+            monkeypatch.delenv(var, raising=False)
+        with caplog.at_level("INFO", logger="job_agent.scraper_reddit"):
+            assert _reddit_client() is None
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("no credentials" in r.getMessage() for r in caplog.records)
+
+    def test_partial_creds_warn(self, monkeypatch, caplog):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "xxx")
+        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
+        monkeypatch.delenv("REDDIT_USER_AGENT", raising=False)
+        with caplog.at_level("INFO", logger="job_agent.scraper_reddit"):
+            assert _reddit_client() is None
+        assert [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
 # --- scrape_reddit (end-to-end with mocked PRAW) --------------------------

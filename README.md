@@ -163,12 +163,27 @@ See [docs/CONFIGURING.md](docs/CONFIGURING.md) for the field-by-field guide.
 
 - **Scrapers** — LinkedIn, Indeed, Glassdoor, ZipRecruiter via `python-jobspy`
   and browser-based fallbacks; about 260 company ATS boards, with scrapers
-  for 12 platforms (Greenhouse, Lever, Ashby, SmartRecruiters, Workday,
-  Recruitee, Workable, Teamtailor, Eightfold, BambooHR, Comeet and a bespoke
-  Apple scraper); niche industry boards, remote boards, RSS feeds, Reddit job
-  subreddits and Google Jobs. The board list in `config.py` is tuned to media
-  and entertainment employers — replace it with yours. Every network call is
-  wrapped in a timeout, so one hung connection cannot stall a run.
+  for 13 platforms (Greenhouse, Lever, Ashby, SmartRecruiters, Workday,
+  Recruitee, Workable, Teamtailor, Eightfold, BambooHR, Comeet, Phenom and a
+  bespoke Apple scraper); niche industry boards, remote boards, RSS feeds,
+  Reddit job subreddits and Google Jobs. The board list in `config.py` is
+  tuned to media and entertainment employers — replace it with yours. Every
+  network call is wrapped in a timeout, so one hung connection cannot stall a
+  run, and one broken board is skipped instead of ending the ATS phase.
+- **Circuit breakers for throttling sites** — LinkedIn throttles logged-out
+  searches on some days: they hang to the timeout or come back empty. After a
+  run of bad searches in a row (`SITE_BREAKER_TRIP` in `config.py`) the run
+  skips LinkedIn's remaining searches, with one probe search per pass so a
+  LinkedIn that recovers is picked up again; one summary line goes to the
+  log. Glassdoor's posting pages and the Workday, Apple and Built In boards
+  have their own stops and time budgets.
+- **Posting text for list-only boards** — Glassdoor, ZipRecruiter and several
+  niche boards list a job without its posting. For the jobs that make a tier,
+  the text is looked up before the documents and the digest: another saved
+  copy of the same job first, then the posting page (its schema.org
+  JobPosting, or the largest block of text). A posting that still has too
+  little text gets the general CV and the templated cover letter, with no
+  model call, and the web UI says why.
 - **Cross-source dedup** — the same job from LinkedIn and an aggregator has
   different URLs and slightly different company spellings. Company names are
   compared as normalised token tuples with corporate suffixes stripped, and a
@@ -198,7 +213,7 @@ See [docs/CONFIGURING.md](docs/CONFIGURING.md) for the field-by-field guide.
 
 ## Tests
 
-About 2,300 tests, all written around a fictional candidate: Marisol
+About 2,550 tests, all written around a fictional candidate: Marisol
 Vantongeren, a video producer in Seattle (`tests/fixtures/test_profile.yaml`).
 `tests/conftest.py` pins that profile before anything else loads, switches
 tracing off and nulls the Anthropic client, so a model call a test forgot to

@@ -460,7 +460,9 @@ def test_run_search_session_passes_db_and_run_id_and_refreshes(monkeypatch):
                                   send_email=False, session=session, db=db)
     assert out == []
     assert seen["func"] is scrape_ats_boards
-    assert seen["kwargs"] == {"db": db, "run_id": session.id}
+    # The ATS calls also carry a deadline (their own budget, minus 30 s).
+    assert seen["kwargs"]["db"] is db and seen["kwargs"]["run_id"] == session.id
+    assert set(seen["kwargs"]) == {"db", "run_id", "deadline"}
     assert db.refreshed == 1
 
 

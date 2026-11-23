@@ -14,7 +14,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-# googleapiclient imports removed (Drive doc-upload retired)
 from dotenv import load_dotenv
 
 from .gpt_filter import call_llm
@@ -25,7 +24,6 @@ from . import cv_facts
 from .candidate_profile import letter_template as profile_letter_template
 from .company_deriver import display_company
 from .jd_sanitizer import sanitize_jd, clean_jd, leaked_trap_tokens, UNTRUSTED_JD_CLAUSE
-# .utils get_google_credentials import removed (Drive doc-upload retired)
 from .config import (DEFAULT_GENERATION_MODEL, TRUNCATION_PROFILE_SUMMARY,
                      DOMAIN_CV_MAP, DOMAIN_DESCRIPTIONS, KEYWORD_TO_CATEGORY,
                      resolve_cv_domain, detect_model_family, METRICS_BANK_TEXT,
@@ -187,12 +185,21 @@ _STATE_ORDER = ("artifact_mismatch", "input_incomplete", "invalid", "check_unava
 def _shipped_text(experience: list, skills_text: str = "") -> str:
     """The verbatim (base / pool) text a CV ships besides its summary: every
     role's title line and bullets, plus SKILLS — where a judge's experience or
-    skills quote must be found to count as a dispute about base text."""
+    skills quote must be found to count as a dispute about base text.
+
+    The roles are included a second time exactly as the judge reads them
+    (cv_tailor._format_experience_for_review joins a role's title and its
+    company / date line with " | "). The stored form keeps those two lines
+    apart, so a quoted role header was never found here, and a dispute about a
+    base header was charged to the summary: a good tailored summary was thrown
+    away over one base header line."""
+    from .cv_tailor import _format_experience_for_review
     parts = []
     for role in experience or []:
         parts.append(str(role.get("title") or ""))
         parts.append(str(role.get("description") or ""))
     parts.append(str(skills_text or ""))
+    parts.append(_format_experience_for_review(experience or []))
     return "\n".join(p for p in parts if p)
 
 
@@ -391,7 +398,8 @@ def save_documents_for_job(
     - Keyword coverage and the hiring-manager grade are diagnostics on the
       FINAL text; nothing they return changes the file.
     - A posting under CV_THIN_POSTING_CHARS (after untrusted-text stripping)
-      ships the general version: base summary + base bullets.
+      ships the general version: base summary + base bullets, and the
+      templated cover letter with no model call (audit["cl"] says why).
     - The saved file is verified (round trip; B2: pool membership); a mismatch
       ships the base bullets.
 
@@ -730,10 +738,12 @@ def save_documents_for_job(
     # cap and the letter truth check (templated letter when the check is
     # unavailable); create_formatted_cl always signs. A failed generation
     # writes no letter. The letter's audit rides in the CV audit as "cl".
+    # A thin posting gets the templated letter with no model call (thin=).
     cl_audit = {"state": "generation_failed", "template_used": False, "signed": False,
                 "company_display": company_display}
     try:
-        logging.info(f"Generating Cover Letter for {job.get('title')} using {model_generation}")
+        if not thin:
+            logging.info(f"Generating Cover Letter for {job.get('title')} using {model_generation}")
         # Feed the CV keyword auditor's confirmed gaps to the CL as a
         # never-claim list (the CL used to have no gap discipline at all).
         _gaps = ((cv_quality_result.get("audit") or {}).get("keyword_coverage") or {}).get("gaps") or []
@@ -741,6 +751,7 @@ def save_documents_for_job(
             profile_text, job, model=model_generation, domain=domain,
             transcript_text=transcript_text, never_claim=_gaps, base_cv_path=resolved_cv_path,
             company_display=company_display, evaluation_date=evaluation_date, sanitized=sanitized,
+            thin=thin,
         )
         if not cl_content:
             raise RuntimeError(cl_audit.get("reason") or "cover letter generation returned no text")
@@ -842,6 +853,14 @@ def generate_package(job: dict, db, profile_text: str, *, base_cv_path: str = "b
         return {"status": "in_progress", **empty}
     try:
         model = model or DEFAULT_GENERATION_MODEL
+        # A job listed without its posting (Glassdoor, ZipRecruiter, small
+        # boards) gets its text looked up first: another saved copy, then the
+        # posting page. Without it the documents can only be the general ones.
+        try:
+            from .posting_text import fill_posting_text
+            fill_posting_text(job, db)
+        except Exception as e:
+            logging.warning(f"generate_package: posting text lookup failed for job {job_id}: {e}")
         try:
             cv_path, cl_path, _cv_id, _cl_id, quality = save_documents_for_job(
                 base_cv_path, profile_text, job, model_generation=model,
@@ -914,7 +933,8 @@ def generate_package(job: dict, db, profile_text: str, *, base_cv_path: str = "b
 # checks (numbers traced to the candidate sources, no known-stale claim, no posting trap
 # token) and a COMPLETE letter truth check. When the check is unavailable, or
 # too little survives, a templated letter built from METRICS_BANK facts ships
-# instead. A failed generation writes no letter at all (never a placeholder).
+# instead. A thin posting gets that templated letter directly (no model call).
+# A failed generation writes no letter at all (never a placeholder).
 
 CL_TARGET_WORDS = "300-400"   # asked of the model
 CL_MAX_BODY_WORDS = 420       # enforced in code (salutation + signature not counted)
@@ -1378,11 +1398,17 @@ def build_cover_letter(
     company_display: str = None,
     evaluation_date: str = None,
     sanitized=None,
+    thin: bool = False,
 ) -> tuple:
     """Generate, check and finish one cover letter. Returns (text, audit).
 
     text: salutation + body paragraphs, WITHOUT a signature (create_formatted_cl
     always signs), or None when generation failed (no letter is written).
+
+    thin: the caller (save_documents_for_job) measured the posting under
+    CV_THIN_POSTING_CHARS. There is nothing to tailor a letter to, so the
+    templated letter ships at once: no model call, no judge call, state
+    input_incomplete with the reason in the audit.
 
     1. generate_cover_letter_content (display company, sanitized posting).
     2. Strip the model's sign-off / salutation; split into sentences.
@@ -1400,8 +1426,8 @@ def build_cover_letter(
        templated letter (templated_letter).
 
     audit (stored as cv_quality_result["audit"]["cl"]): state (ok /
-    check_unavailable / invalid / generation_failed), reason, words,
-    model_words, dropped_sentences [{stage, detail, quote}], template_used,
+    check_unavailable / invalid / input_incomplete / generation_failed), reason,
+    words, model_words, dropped_sentences [{stage, detail, quote}], template_used,
     company_display, signed, posting_chars, never_claim, style_hits, judge."""
     company_display = display_company(job) if company_display is None else company_display
     if sanitized is None:
@@ -1413,6 +1439,21 @@ def build_cover_letter(
              "dropped_sentences": [], "template_used": False, "company_display": company_display,
              "signed": False, "posting_chars": len(jd_text),
              "never_claim": _never_claim_terms(never_claim)}
+
+    def ship_template(state: str, reason: str, level: int = logging.WARNING) -> tuple:
+        text = templated_letter(job, domain, company_display)
+        audit.update(state=state, reason=reason, template_used=True,
+                     words=_letter_words(_letter_paragraphs(text)))
+        logging.log(level, f"Cover letter: templated letter ships ({state}: {reason})")
+        return text, audit
+
+    if thin:
+        # A letter written from the title alone is a paid call of over a
+        # minute with no posting to work from. This is the intended path for
+        # a posting with no text, so it logs at INFO, not as a warning.
+        return ship_template("input_incomplete",
+                             f"thin posting ({len(jd_text)} chars after cleaning) — "
+                             f"standard letter, no model call", level=logging.INFO)
 
     raw = generate_cover_letter_content(
         profile_text, job, model=model, domain=domain, transcript_text=transcript_text,
@@ -1433,13 +1474,6 @@ def build_cover_letter(
     dropped.extend(_drop_unverified_sentences(paras, corpus, sanitized,
                                               context=[jd_text, company_context]))
     dropped.extend(_cap_letter(paras, CL_MAX_BODY_WORDS))
-
-    def ship_template(state: str, reason: str) -> tuple:
-        text = templated_letter(job, domain, company_display)
-        audit.update(state=state, reason=reason, template_used=True,
-                     words=_letter_words(_letter_paragraphs(text)))
-        logging.warning(f"Cover letter: templated letter ships ({state}: {reason})")
-        return text, audit
 
     words = _letter_words(paras)
     if words > CL_MAX_BODY_WORDS:

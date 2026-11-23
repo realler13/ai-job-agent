@@ -643,6 +643,64 @@ class DBManager:
             logger.error(f"Error looking up job by link: {e}")
             return None
 
+    def find_posting_text(self, title: str, company: str, exclude_id=None, days: int = 45) -> str:
+        """The posting text of another saved copy of the same job (same title
+        and company, case-insensitive, saved in the last *days* days), newest
+        first, or "". Used for jobs whose source lists them without text
+        (posting_text.find_text)."""
+        if not title or not company:
+            return ""
+        try:
+            conn = self._get_thread_conn()
+            rows = conn.execute(
+                "SELECT id, raw_data FROM scrapes WHERE lower(trim(title)) = lower(trim(?)) "
+                "AND lower(trim(company)) = lower(trim(?)) AND created_at >= datetime('now', ?) "
+                "ORDER BY id DESC LIMIT 20",
+                (title, company, f"-{int(days)} days")).fetchall()
+        except Exception as e:
+            logger.error(f"Error looking up another copy of {title!r}: {e}")
+            return ""
+        for row_id, raw in rows:
+            if exclude_id is not None and str(row_id) == str(exclude_id):
+                continue
+            try:
+                data = json.loads(raw) if raw else {}
+            except Exception:
+                continue
+            text = data.get("description") if isinstance(data, dict) else None
+            if isinstance(text, str) and len(text.strip()) >= 300:
+                return text
+        return ""
+
+    def set_posting_text(self, text: str, source: str = "", job_id=None, link: str = None) -> bool:
+        """Store posting text found after the job was saved: raw_data's
+        description (what the app and the documents read) and its source.
+        The row is found by id, else by link. Returns True when a row changed."""
+        try:
+            with self.transaction() as conn:
+                if job_id is not None:
+                    row = conn.execute("SELECT id, raw_data FROM scrapes WHERE id = ?", (int(job_id),)).fetchone()
+                elif link:
+                    row = conn.execute("SELECT id, raw_data FROM scrapes WHERE link = ?", (link,)).fetchone()
+                else:
+                    return False
+                if not row:
+                    return False
+                try:
+                    data = json.loads(row[1]) if row[1] else {}
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+                data["description"] = text
+                data["description_source"] = source
+                conn.execute("UPDATE scrapes SET raw_data = ? WHERE id = ?",
+                             (json.dumps(data, default=str), row[0]))
+                return True
+        except Exception as e:
+            logger.error(f"Error saving posting text (job {job_id}, link {link!r}): {e}")
+            return False
+
     def get_job_location(self, job_id: int) -> Optional[str]:
         """Return the stored location string for a job id, or None."""
         try:
@@ -1183,6 +1241,17 @@ class DBManager:
                     s.confidence,
                     s.keyword_category,
                     s.cv_quality_flag,
+                    s.cv_domain_used,
+                    -- The few audit fields the card's document panel reads
+                    -- (why a CV or letter is the general version). The full
+                    -- audit is several KB a job; sending all of it would make
+                    -- every board load many times heavier. A non-JSON audit
+                    -- passes through.
+                    CASE WHEN json_valid(s.cv_audit_summary) THEN json_object(
+                        'states', json(json_extract(s.cv_audit_summary, '$.states')),
+                        'jd_chars', json_extract(s.cv_audit_summary, '$.jd_chars'),
+                        'cl', json_object('state', json_extract(s.cv_audit_summary, '$.cl.state')))
+                    ELSE s.cv_audit_summary END AS cv_audit_summary,
                     -- Phase 27c: a tracked card is never hidden; it only
                     -- shows "No longer on <company>'s job board since …".
                     s.listing_status,

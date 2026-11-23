@@ -308,7 +308,6 @@ def test_pipeline_auto_generation_uses_the_shared_path(tmp_db, tmp_path, sample_
 
     monkeypatch.setattr(main, "batch_job_relevance_check", fake_batch_check)
     monkeypatch.setattr(main, "load_profile_text", lambda path: "PROFILE")
-    monkeypatch.setattr(main, "upload_to_google_sheets", lambda df: None)
     monkeypatch.setattr(main, "AUTO_GENERATE_CV_CL", True)
     monkeypatch.setattr("job_agent.config.AUTO_CV_MAX_PER_RUN", 2)
     fake = FakeGeneration(tmp_path)

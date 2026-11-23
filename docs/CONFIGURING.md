@@ -151,6 +151,28 @@ error that names the key. A card's location is the first of your
 `primary_metro_terms`, then `secondary_metro_terms` (the town of a term written
 with its state), then "Remote" or "Hybrid", that the card mentions.
 
+### `search.glassdoor_city_id`
+
+Glassdoor ignores a typed location: a search for "Video Producer" in
+"Seattle, WA" returns the nationwide results. Only Glassdoor's own location id
+narrows a search to one place. To find your city's id, run a job search for
+your city on glassdoor.com and look at the address of the results page: it
+carries `locT=C&locId=<number>` (`locT` is the kind of place, `C` for a city;
+`locId` is the id). Write them into the profile:
+
+```yaml
+search:
+  glassdoor_city_id: {type: C, id: <the locId number>}
+```
+
+With the key, every Glassdoor keyword is searched twice: in your home city
+(`search.locations.home`), then nationwide, the search that brings remote
+roles and roles in other metros (the location rules above sort them). Without
+it, Glassdoor is searched nationwide only, and nothing is logged about it. The
+key is optional and has no default. `id` must be a positive whole number and
+`type` (default `C`) a single letter; anything else raises an error that names
+the key.
+
 ## `metrics_text`
 
 The block of verified facts that is injected into every generation prompt.

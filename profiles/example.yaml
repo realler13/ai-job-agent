@@ -110,6 +110,11 @@ search:
   # Built In has a site per metro: check the address opens before adding one (no key = no Built In).
   builtin_sites:
   - https://www.builtinseattle.com
+  # Glassdoor ignores a typed location and searches the whole country. To also
+  # search your home city, give its Glassdoor location id: run a Glassdoor job
+  # search for the city and copy locT (type) and locId (id) from the address.
+  # Optional; without it Glassdoor is searched nationwide only.
+  # glassdoor_city_id: {type: C, id: <locId>}
   # Postings older than this are dropped before grading (the Review list shows
   # nothing older than 7 days anyway).
   stale_posting_days: 7

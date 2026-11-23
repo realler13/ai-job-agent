@@ -13,13 +13,23 @@ Card structure (verified April 2026 via live probe):
   div[data-id="job-card"] id="job-card-{id}"
     a[data-id="company-title"]                    → company name
     a[data-id="job-card-title"]                   → job title + URL path
-    span ... "Reposted X Hours/Days Ago"          → posting age
+    span ... "9 Days Ago" / "Reposted An Hour Ago" → posting age (own span)
 
 Built In jobs are indexed by numeric ID embedded in the URL path
 (/job/{slug}/{id}), which we use for deduplication.
+
+The list view carries no posting text. Each posting page does, in a
+schema.org JobPosting (application/ld+json) and in div#job-post-body-{id},
+so after the search the newest matched postings get their page fetched for
+the description (capped per run, see DETAIL_FETCH_CAP). The same JobPosting
+carries datePosted, a plain date that matches the card's "N Days Ago" (for a
+reposted card it is the repost date). It replaces the card's relative age on
+the postings whose page is fetched; the rest keep the card's age.
 """
 from __future__ import annotations
 
+import html
+import json
 import logging
 import re
 import time
@@ -31,6 +41,7 @@ from bs4 import BeautifulSoup
 from .ats_scraper import _matches_keywords
 from .candidate_profile import builtin_sites
 from .config import PRIMARY_METRO_TERMS, SECONDARY_METRO_TERMS, _parse_metro_term
+from .utils import normalize_date_posted
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +93,15 @@ LOCATION_HINTS = location_hints(PRIMARY_METRO_TERMS, SECONDARY_METRO_TERMS)
 REQUEST_TIMEOUT = 20
 INTER_REQUEST_DELAY = 1.0
 
+# Posting pages fetched per run for their text. Most matched postings were
+# saved by earlier runs (save_job keeps the first copy). Built In ids grow with
+# time, so the newest ids are fetched first and this cap covers the new ones
+# without hitting every page on every run.
+DETAIL_FETCH_CAP = 40
+DETAIL_TIMEOUT = 15
+# Consecutive failed posting pages before the rest are skipped this run.
+DETAIL_MAX_FAILURES = 3
+
 # Broad seed queries for Built In's fuzzy server search. Querying all ~148
 # keywords (2 regions x 148 x 3 pages ≈ 888 requests) triggered HTTP 429; these
 # few seeds catch the same roles and each result is title-gated against the full
@@ -102,36 +122,41 @@ _session.headers.update({
 })
 
 
+# The card's age line. Cards dropped the "Posted" prefix ("9 Days Ago", "An
+# Hour Ago", "One Month Ago", "Yesterday"); a reposted card still says
+# "Reposted 7 Days Ago". A pattern that requires the prefix leaves most Built
+# In rows with no date.
+_AGE_RE = re.compile(
+    r"(?:(?:re)?posted\s+)?"
+    r"(?:(\d+|an?|one)\+?\s+(minute|hour|day|week|month|year)s?\s+ago|(today|yesterday))",
+    re.I,
+)
+
+
 def _parse_posting_age(text: str) -> str:
-    """Convert "Reposted 3 Hours Ago" → "YYYY-MM-DD" (today).
-    Returns empty string if unparseable."""
-    if not text:
-        return ""
-    m = re.search(
-        r"(?:reposted|posted)\s+(\d+)\s+(hour|day|week|month)s?\s+ago",
-        text, re.I,
-    )
+    """Convert "9 Days Ago" / "Reposted 3 Hours Ago" / "Yesterday" →
+    "YYYY-MM-DD". Returns empty string if unparseable."""
+    m = _AGE_RE.search(text or "")
     if not m:
-        # Some say "Today" or "Yesterday"
-        if "today" in text.lower():
-            return datetime.now().strftime("%Y-%m-%d")
-        if "yesterday" in text.lower():
-            return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         return ""
-    n = int(m.group(1))
-    unit = m.group(2).lower()
     now = datetime.now()
-    if unit == "hour":
-        dt = now
-    elif unit == "day":
-        dt = now - timedelta(days=n)
-    elif unit == "week":
-        dt = now - timedelta(weeks=n)
-    elif unit == "month":
-        dt = now - timedelta(days=30 * n)
-    else:
-        return ""
-    return dt.strftime("%Y-%m-%d")
+    if m.group(3):
+        days = 0 if m.group(3).lower() == "today" else 1
+        return (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    n = int(m.group(1)) if m.group(1).isdigit() else 1  # "A", "An", "One"
+    days = {"minute": 0, "hour": 0, "day": n, "week": 7 * n,
+            "month": 30 * n, "year": 365 * n}[m.group(2).lower()]
+    return (now - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _card_age(card) -> str:
+    """The card's age as YYYY-MM-DD, read from the text node that is only the
+    age line. The card also holds a description snippet, and a word like
+    "today" in it must not date the posting."""
+    for node in card.find_all(string=True):
+        if _AGE_RE.fullmatch(node.strip()):
+            return _parse_posting_age(node.strip())
+    return ""
 
 
 def _parse_card(card, base_url: str) -> dict | None:
@@ -148,9 +173,9 @@ def _parse_card(card, base_url: str) -> dict | None:
         return None
     job_url = href if href.startswith("http") else f"{base_url}{href}"
 
-    # Full card text — pull posting-age line, location hints, salary hints
+    # Full card text — pull location hints
     card_text = card.get_text(" ", strip=True)
-    date_posted = _parse_posting_age(card_text)
+    date_posted = _card_age(card)
 
     # Location: Built In cards include city/state + work-arrangement tags. Our
     # pipeline already has a location pre-filter, so we stash whatever short
@@ -168,21 +193,21 @@ def _parse_card(card, base_url: str) -> dict | None:
         "company": company,
         "location": location,
         "job_url": job_url,
-        "description": "",  # Built In list view doesn't include a snippet
-        "date_posted": date_posted,
+        "description": "",  # list view has none; _add_descriptions fills it
+        "date_posted": date_posted,  # _add_descriptions swaps in the page's date
         "site": "builtin",
         "department": "",
     }
 
 
-def _get_with_backoff(url: str, max_retries: int = 3):
+def _get_with_backoff(url: str, max_retries: int = 3, timeout: float = REQUEST_TIMEOUT):
     """GET with exponential backoff on HTTP 429 (Built In rate-limits hard).
 
     Returns the Response, or None if 429 persisted through all retries.
     Raises on non-429 HTTP errors (caller handles).
     """
     for attempt in range(max_retries):
-        r = _session.get(url, timeout=REQUEST_TIMEOUT)
+        r = _session.get(url, timeout=timeout)
         if r.status_code == 429:
             wait = INTER_REQUEST_DELAY * (2 ** attempt) + 1.0
             logger.info(f"Built In 429 — backing off {wait:.0f}s (attempt {attempt + 1}/{max_retries})")
@@ -191,6 +216,104 @@ def _get_with_backoff(url: str, max_retries: int = 3):
         r.raise_for_status()
         return r
     return None
+
+
+def _job_id(job_url: str) -> int:
+    """Built In's numeric posting id from /job/{slug}/{id} (0 if absent)."""
+    m = re.search(r"/(\d+)/?(?:[?#].*)?$", job_url or "")
+    return int(m.group(1)) if m else 0
+
+
+def _html_to_text(fragment: str) -> str:
+    """Posting HTML → plain text, one line per block, like the page reads."""
+    return BeautifulSoup(fragment, "html.parser").get_text("\n", strip=True)
+
+
+def _parse_description(page_html: str) -> str:
+    """Pull the posting text out of a Built In posting page."""
+    return _parse_posting_page(page_html)[0]
+
+
+def _parse_posting_page(page_html: str) -> tuple[str, str]:
+    """(posting text, date posted as YYYY-MM-DD) from a Built In posting page;
+    either is "" when the page lacks it.
+
+    The JobPosting JSON-LD is the stable source (it is what search engines
+    read); the rendered body div is the fallback for the text if that block
+    is missing.
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    date_posted = ""
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or script.get_text() or "")
+        except ValueError:
+            continue
+        # Built In wraps the JobPosting in an @graph; plain top-level also counts.
+        nodes = []
+        for n in data if isinstance(data, list) else [data]:
+            if isinstance(n, dict):
+                nodes.append(n)
+                nodes.extend(n.get("@graph") or [])
+        for node in nodes:
+            if not (isinstance(node, dict) and node.get("@type") == "JobPosting"):
+                continue
+            date_posted = date_posted or normalize_date_posted(node.get("datePosted"))
+            if node.get("description"):
+                # The JSON string holds HTML; unescape first in case the
+                # markup itself arrives entity-encoded.
+                text = _html_to_text(html.unescape(node["description"]))
+                if text:
+                    return text, date_posted
+    body = soup.select_one('div[id^="job-post-body-"]')
+    return (body.get_text("\n", strip=True) if body else ""), date_posted
+
+
+def _add_descriptions(jobs: list[dict], cap: int = DETAIL_FETCH_CAP) -> int:
+    """Fill job["description"] in place from each posting page, newest first,
+    and job["date_posted"] from the page's datePosted when it has one (a
+    plain date beats the card's "N Days Ago").
+
+    At most `cap` pages; each gets DETAIL_TIMEOUT seconds. A persistent 429
+    or DETAIL_MAX_FAILURES failed pages in a row stop the fetching — those
+    jobs keep the list data, as before. Returns how many got text.
+    """
+    picked = sorted(jobs, key=lambda j: _job_id(j["job_url"]), reverse=True)[:cap]
+    by_id: dict[int, tuple[str, str]] = {}  # the same posting can come from several Built In sites
+    filled = failures = 0
+    for job in picked:
+        jid = _job_id(job["job_url"])
+        if jid and jid in by_id:
+            text, date_posted = by_id[jid]
+        else:
+            text = date_posted = ""
+            try:
+                r = _get_with_backoff(job["job_url"], timeout=DETAIL_TIMEOUT)
+                if r is None:
+                    logger.warning("Built In: posting pages still 429 after retries — stopping description fetch")
+                    break
+                text, date_posted = _parse_posting_page(r.text)
+            except Exception as e:
+                logger.debug(f"Built In posting page {job['job_url']}: {e}")
+            if jid:
+                by_id[jid] = (text, date_posted)
+            failures = 0 if text else failures + 1
+            if failures >= DETAIL_MAX_FAILURES:
+                logger.warning(
+                    f"Built In: {failures} posting pages in a row gave no text — stopping description fetch"
+                )
+                break
+            time.sleep(INTER_REQUEST_DELAY)
+        if date_posted:
+            job["date_posted"] = date_posted
+        if text:
+            job["description"] = text
+            filled += 1
+    logger.info(
+        f"Built In: description for {filled} of the {len(picked)} newest postings "
+        f"({len(jobs) - len(picked)} older ones keep list data)"
+    )
+    return filled
 
 
 def _scrape_region(region: str, seed: str, match_keywords: list[str], max_pages: int = 3) -> list[dict]:
@@ -269,6 +392,9 @@ def scrape_builtin(keywords: list[str], max_pages: int = 3) -> list[dict]:
                     continue
                 seen_urls.add(job["job_url"])
                 all_jobs.append(job)
+
+    if all_jobs:
+        _add_descriptions(all_jobs)
 
     logger.info(
         f"Built In: {len(all_jobs)} unique jobs "

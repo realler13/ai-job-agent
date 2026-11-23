@@ -10,26 +10,11 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime
-# gspread import removed (Sheets sync retired — see upload_to_google_sheets stub)
-from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from .utils import get_google_credentials, is_posting_old, normalize_date_posted
-
-
-def upload_to_google_sheets(df: pd.DataFrame):
-    """RETIRED — always returns None.
-
-    Sheets sync was removed: the web app is the interface and the digest
-    email already attaches the full CSV. Kept as a stub so legacy call
-    sites/tests stay harmless.
-    """
-    logging.info("Sheets sync retired — skipping.")
-    return None
-
-
+from .utils import is_posting_old, normalize_date_posted
 import pytz
 
 
@@ -348,7 +333,7 @@ def _posting_glance_html(job, db) -> str:
             + " &middot; ".join(parts) + "</div>")
 
 
-def send_email_with_results(csv_path: str, recipient: str, df: pd.DataFrame, profile_text: str = "", spreadsheet_url: str = "", total_scraped: int = 0, cascade_stats: dict = None, db=None,
+def send_email_with_results(csv_path: str, recipient: str, df: pd.DataFrame, profile_text: str = "", total_scraped: int = 0, cascade_stats: dict = None, db=None,
                             *, subject: str = None, intro_html: str = "", include_followups: bool = None,
                             recovered_df: pd.DataFrame = None, recovered_note: str = ""):
     """The digest email. The keyword-only options serve a re-sent or combined
@@ -668,9 +653,6 @@ def send_email_with_results(csv_path: str, recipient: str, df: pd.DataFrame, pro
         subject = subject or f"Your Job Digest \u2014 Nothing new today ({datetime.now(pacific).strftime('%b %d')})"
     else:
         # --- Results email: two sections, exactly like the app ---
-        sheets_link = ""
-        if spreadsheet_url:
-            sheets_link = f'&nbsp;&bull;&nbsp;<a href="{spreadsheet_url}" style="color:#2563eb;">Google Sheets</a>'
 
         html_body = f"""
     <html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 640px; margin: 0 auto; color: #333; padding: 0 10px; word-break: break-word; overflow-wrap: anywhere;">
@@ -696,7 +678,7 @@ def send_email_with_results(csv_path: str, recipient: str, df: pd.DataFrame, pro
 
     {cascade_summary_html}
 
-    <p style="color:#666;font-size:13px;margin-top:14px;">Full CSV attached{sheets_link}</p>
+    <p style="color:#666;font-size:13px;margin-top:14px;">Full CSV attached</p>
 
     <p style="margin-top: 22px;">{signoff}</p>
 

@@ -5,17 +5,21 @@ Eightfold API: GET https://explore.jobs.netflix.net/api/apply/v2/jobs
     ?domain={token}&start={offset}&num={limit}&query={search_term}
     Returns JSON: {count, positions: [{name, location, locations, department, ...}]}
 
-Apple Careers: GET https://jobs.apple.com/{locale}/search?search={query}&page={page}
+Apple Careers: GET https://jobs.apple.com/{locale}/search?search={query}&location=united-states-USA&page={page}
     Returns HTML with SSR hydration: JSON.parse("...") containing searchResults[].
+    Per posting: GET https://jobs.apple.com/api/v1/jobDetails/{positionId} (JSON: level, pay).
 """
 
 import json
 import logging
 import re
+import time
 
 import requests
 
 from .ats_scraper import _matches_keywords, _strip_html, report_board_fetch
+from .config import STALE_POSTING_DAYS
+from .utils import is_posting_old
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _EIGHTFOLD_API = "https://explore.jobs.netflix.net/api/apply/v2/jobs"
+
+
+_RETRY_429_WAITS = (5, 15, 30)   # seconds
+
+
+def _get_eightfold_page(token: str, offset: int, page_size: int):
+    """One page of the positions API. A 429 is retried after a short wait:
+    one rate-limit reply used to end the whole fetch, and Netflix was skipped
+    on a large share of runs. The waits total under a minute so the fetch
+    stays inside the per-board time limit."""
+    params = {"domain": token, "start": offset, "num": page_size, "query": ""}
+    resp = requests.get(_EIGHTFOLD_API, params=params, timeout=15)
+    for wait in _RETRY_429_WAITS:
+        if resp.status_code != 429:
+            break
+        logger.info(f"Eightfold rate limit (429) — retrying in {wait}s")
+        time.sleep(wait)
+        resp = requests.get(_EIGHTFOLD_API, params=params, timeout=15)
+    return resp
 
 
 def scrape_eightfold(token: str, company: str, keywords: list[str]) -> list[dict]:
@@ -59,11 +82,7 @@ def scrape_eightfold(token: str, company: str, keywords: list[str]) -> list[dict
 
     for _ in range(max_pages):
         try:
-            resp = requests.get(
-                _EIGHTFOLD_API,
-                params={"domain": token, "start": offset, "num": page_size, "query": ""},
-                timeout=15,
-            )
+            resp = _get_eightfold_page(token, offset, page_size)
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
@@ -127,6 +146,129 @@ def scrape_eightfold(token: str, company: str, keywords: list[str]) -> list[dict
 # ---------------------------------------------------------------------------
 
 _APPLE_SEARCH_URL = "https://jobs.apple.com/{locale}/search"
+# The JSON the job page itself is built from: about a tenth of the page's size
+# and half its time, and it carries the level and the pay too.
+_APPLE_DETAIL_API = "https://jobs.apple.com/api/v1/jobDetails/{position_id}"
+_APPLE_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+# A single 'producer' seed missed podcast/program/content roles entirely.
+# Titles are still gated against the FULL keyword list below, so broad seeds
+# add recall without noise.
+_APPLE_SEEDS = ["producer", "production", "podcast", "content"]
+_APPLE_MAX_PAGES = 5
+# US postings only: the worldwide search filled the five pages with India /
+# Saudi / China roles the location gate drops anyway, and only the US-filtered
+# search names the city instead of just the country.
+_APPLE_LOCATION = "united-states-USA"
+
+# jobs.apple.com can answer slowly for days at a time: 15s read timeouts,
+# first on the job pages, then on the search pages too, until no seed gets
+# past page 1 and a run finds no Apple jobs at all, while the same requests
+# take 0.4s (search) and 4-6s (job page) at a quieter hour. So: a longer read
+# timeout, a retry with backoff after a timeout, a pause between requests,
+# and two stops so a slow Apple can never eat the ATS phase's time budget.
+_APPLE_TIMEOUT = (5, 25)              # (connect, read) seconds
+_APPLE_RETRY_WAITS = (5, 15)          # seconds before the 2nd and 3rd try
+_APPLE_PAUSE_SEC = 1.0                # between any two requests
+_APPLE_MAX_FAILURES_IN_ROW = 2        # requests that failed after all retries
+_APPLE_BUDGET_SEC = 300               # the whole Apple scrape
+_APPLE_MAX_DETAILS = 25               # job pages read per run
+# The search spends the shared budget first. When Apple was slow but still
+# answering, paging used it all and every row came back without its level and
+# pay, so the level rule and the comp floor could not act. Paging stops once
+# this share of the budget is gone; the rest is for the job reads.
+_APPLE_SEARCH_SHARE = 0.5
+
+
+class _AppleFetcher:
+    """Every jobs.apple.com request of one scrape goes through here: one pause
+    between requests, retries after a timeout / 429 / 5xx, and a stop for the
+    rest of the scrape once Apple stops answering or the time budget is spent."""
+
+    def __init__(self):
+        self.started = time.monotonic()
+        self.requests = 0
+        self.failures_in_row = 0
+        self.stopped = ""
+        self.answered_with = 0   # HTTP status of a refused (4xx) last request
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def _out_of_time(self) -> bool:
+        if time.monotonic() - self.started > _APPLE_BUDGET_SEC:
+            if not self.stopped:
+                self.stopped = f"time budget of {_APPLE_BUDGET_SEC}s spent"
+                logger.warning(f"Apple: {self.stopped} — stopping for this run")
+            return True
+        return False
+
+    def get(self, url: str, params: dict | None = None):
+        """The response, or None when Apple did not answer usefully."""
+        self.answered_with = 0
+        if self.stopped or self._out_of_time():
+            return None
+        last_error = None
+        for wait in (0,) + _APPLE_RETRY_WAITS:
+            if wait:
+                time.sleep(wait)
+                if self._out_of_time():
+                    return None
+            elif self.requests:
+                time.sleep(_APPLE_PAUSE_SEC)
+            self.requests += 1
+            try:
+                resp = requests.get(url, params=params, headers=_APPLE_HEADERS,
+                                    timeout=_APPLE_TIMEOUT)
+                resp.raise_for_status()
+                self.failures_in_row = 0
+                return resp
+            except (requests.Timeout, requests.ConnectionError) as e:
+                last_error = e                       # slow or busy: try again
+            except requests.HTTPError as e:
+                code = e.response.status_code if e.response is not None else 0
+                if code == 429 or code >= 500:
+                    last_error = e                   # busy: try again
+                    continue
+                # Apple answered: a 404 & co is about this URL, not a sign
+                # that Apple is slow, so it never counts toward the stop.
+                logger.debug(f"Apple {code} for {url} {params or ''}")
+                self.failures_in_row = 0
+                self.answered_with = code
+                return None
+            except Exception as e:
+                # main.py's phase budget (SIGALRM) arrives as _ScrapeTimeout
+                # inside requests.get: it must end the ATS phase, not count
+                # as one failed Apple request.
+                if type(e).__name__ == "_ScrapeTimeout":
+                    raise
+                last_error = e
+                break
+        self.failures_in_row += 1
+        logger.warning(f"Apple fetch failed ({url} {params or ''}): {last_error}")
+        if self.failures_in_row >= _APPLE_MAX_FAILURES_IN_ROW:
+            self.stopped = f"{self.failures_in_row} requests in a row failed"
+            logger.warning(f"Apple: {self.stopped} — stopping for this run")
+        return None
+
+
+def _apple_location(loc: dict) -> str:
+    # The US-filtered search often leaves 'city' blank and names the place in
+    # 'name' ("Orlando").
+    city = loc.get("city", "") or loc.get("name", "")
+    parts = [p for p in (city, loc.get("stateProvince", ""), loc.get("countryName", "")) if p]
+    return ", ".join(dict.fromkeys(parts))
+
+
+def _apple_is_stale(job: dict) -> bool:
+    """Older than the pre-filter's stale gate, which drops it whatever its
+    level is. Unknown dates are not stale (the gate lets them through too)."""
+    date = str(job.get("postDateInGMT", "") or "")[:10]
+    return is_posting_old(date, days=STALE_POSTING_DAYS)
+
+
+def _apple_post_date(job: dict) -> str:
+    """The posting's ISO date-time, for newest-first ordering ('' sorts last)."""
+    return str(job.get("postDateInGMT", "") or "")
 
 
 def scrape_apple(token: str, company: str, keywords: list[str]) -> list[dict]:
@@ -141,89 +283,104 @@ def scrape_apple(token: str, company: str, keywords: list[str]) -> list[dict]:
     Returns:
         List of standardized job dicts
     """
-    results = []
-    seen_ids: set[str] = set()
-    max_pages = 5
-    # A single 'producer' seed missed podcast/program/content roles entirely.
-    # Titles are still gated against the FULL keyword list below, so broad
-    # seeds add recall without noise.
-    _APPLE_SEEDS = ["producer", "production", "podcast", "content"]
+    fetcher = _AppleFetcher()
+    # One posting is listed once per location (id "200000001-0101",
+    # "200000001-0102", ...); positionId is the posting. Keyed by it, the
+    # locations merge into one row and its job page is read once.
+    postings: dict[str, dict] = {}
+    locations: dict[str, list[str]] = {}
+    pages = 0
+    search_cut = ""
 
     for seed in _APPLE_SEEDS:
-      for page in range(1, max_pages + 1):
-        try:
-            resp = requests.get(
-                _APPLE_SEARCH_URL.format(locale=token),
-                params={"search": seed, "page": page},
-                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            logger.warning(f"Apple careers fetch error page {page}: {e}")
+        for page in range(1, _APPLE_MAX_PAGES + 1):
+            if fetcher.elapsed() > _APPLE_BUDGET_SEC * _APPLE_SEARCH_SHARE:
+                search_cut = (f"search stopped at {fetcher.elapsed():.0f}s to "
+                              f"leave time for the job reads")
+                logger.warning(f"Apple: {search_cut}")
+                break
+            resp = fetcher.get(_APPLE_SEARCH_URL.format(locale=token),
+                               {"search": seed, "location": _APPLE_LOCATION, "page": page})
+            if resp is None:
+                break
+            pages += 1
+            # Only postings in the shape we know: one odd entry must not end
+            # the scrape (and the ATS phase with it).
+            search_results = [j for j in _extract_apple_hydration(resp.text)
+                              if isinstance(j, dict)]
+            if not search_results:
+                break
+            for job in search_results:
+                position_id = str(job.get("positionId", "") or job.get("id", ""))
+                if not position_id:
+                    continue
+                if position_id not in postings:
+                    postings[position_id] = job
+                    locations[position_id] = []
+                for loc in job.get("locations", []) or []:
+                    if not isinstance(loc, dict):
+                        continue
+                    text = _apple_location(loc)
+                    if text and text not in locations[position_id]:
+                        locations[position_id].append(text)
+            # Newest first: once a whole page is past the stale gate, every
+            # later page is too.
+            if all(_apple_is_stale(j) for j in search_results):
+                break
+        if fetcher.stopped or search_cut:
             break
 
-        # Extract hydration JSON from HTML
-        search_results = _extract_apple_hydration(resp.text)
-        if not search_results:
+    matching = [(pid, job) for pid, job in postings.items()
+                if _matches_keywords(job.get("postingTitle", ""), keywords)]
+
+    # The job page adds what the search leaves out: the Pay & Benefits
+    # section (without it, a posting's hourly pay range never reached the DB)
+    # and Apple's internal level (see
+    # format_apple_level). Not read for a posting the stale gate drops
+    # anyway, and not past the cap. Newest first: the cap and the time
+    # budget then cut the oldest postings, the ones least worth applying to.
+    to_read = sorted((pid for pid, job in matching if not _apple_is_stale(job)),
+                     key=lambda pid: _apple_post_date(postings[pid]), reverse=True)
+    details: dict[str, dict] = {}
+    for position_id in to_read[:_APPLE_MAX_DETAILS]:
+        if fetcher.stopped:
             break
+        details[position_id] = _fetch_apple_detail_fields(position_id, token, fetcher)
+    details_read = len(details)
 
-        for job in search_results:
-            title = job.get("postingTitle", "")
-            job_id = str(job.get("id", ""))
+    results = []
+    for position_id, job in matching:
+        title = job.get("postingTitle", "")
+        job_url = f"https://jobs.apple.com/{token}/details/{position_id}"
+        detail = details.get(position_id, {})
+        pay_section = detail.get("pay", "")
+        level = detail.get("level", "")
+        desc = job.get("jobSummary", "")
+        if pay_section:
+            desc = (desc + "\n\n" + pay_section).strip()
+        if level:
+            # First line, so a truncated description never loses it and
+            # the cascade's seniority judgment sees it.
+            desc = f"{apple_level_line(level)}\n\n{desc}".strip()
+        results.append({
+            "title": title,
+            "company": company,
+            "location": "; ".join(locations.get(position_id, [])),
+            "link": job_url,
+            "job_url": job_url,
+            "description": desc,
+            "date_posted": job.get("postDateInGMT", "") or job.get("postingDate", ""),
+            "site": "apple",
+            "department": "",
+            "job_level": level,
+        })
 
-            if job_id in seen_ids:
-                continue
-            seen_ids.add(job_id)
-
-            if not _matches_keywords(title, keywords):
-                continue
-
-            # Parse locations
-            locations = job.get("locations", [])
-            location_parts = []
-            for loc in locations:
-                city = loc.get("city", "")
-                state = loc.get("stateProvince", "")
-                country = loc.get("countryName", "")
-                parts = [p for p in [city, state, country] if p]
-                if parts:
-                    location_parts.append(", ".join(parts))
-            location_str = "; ".join(location_parts) if location_parts else ""
-
-            position_id = job.get("positionId", "")
-            job_url = f"https://jobs.apple.com/{token}/details/{position_id}" if position_id else ""
-
-            # Append the detail page's Pay & Benefits section — the search
-            # hydration's jobSummary LOSES it (2026-07-26: a posting's
-            # hourly pay range never reached the DB).
-            # Matched Apple jobs are few, so one detail fetch each is cheap.
-            # The same fetch carries Apple's internal level (see
-            # format_apple_level), which only the detail page has.
-            detail = _fetch_apple_detail_fields(job_url) if job_url else {}
-            pay_section = detail.get("pay", "")
-            level = detail.get("level", "")
-            desc = job.get("jobSummary", "")
-            if pay_section:
-                desc = (desc + "\n\n" + pay_section).strip()
-            if level:
-                # First line, so a truncated description never loses it and
-                # the cascade's seniority judgment sees it.
-                desc = f"{apple_level_line(level)}\n\n{desc}".strip()
-            results.append({
-                "title": title,
-                "company": company,
-                "location": location_str,
-                "link": job_url,
-                "job_url": job_url,
-                "description": desc,
-                "date_posted": job.get("postDateInGMT", "") or job.get("postingDate", ""),
-                "site": "apple",
-                "department": "",
-                "job_level": level,
-            })
-
-    logger.info(f"Apple: {len(results)} matching jobs")
+    logger.info(
+        f"Apple: {len(results)} matching jobs (scanned {len(postings)} postings on "
+        f"{pages} search pages, read {details_read} job pages, "
+        f"{fetcher.requests} requests in {time.monotonic() - fetcher.started:.0f}s"
+        + (f"; {search_cut}" if search_cut else "")
+        + (f"; stopped early: {fetcher.stopped}" if fetcher.stopped else "") + ")")
     return results
 
 
@@ -252,8 +409,8 @@ def format_apple_level(low: str, high: str) -> str:
     lf, _, lcode = low.rpartition(" ")
     hf, _, hcode = high.rpartition(" ")
     if lf and lf == hf:
-        return f"{lf} {lcode}\u2013{hcode}"
-    return f"{low} \u2013 {high}"
+        return f"{lf} {lcode}–{hcode}"
+    return f"{low} – {high}"
 
 
 def apple_level_line(level: str) -> str:
@@ -275,26 +432,71 @@ def apple_level_line(level: str) -> str:
             f"{below}the MGR people-manager ladder are outside it)")
 
 
-def _fetch_apple_detail_fields(url: str, timeout: int = 15) -> dict:
-    """Fetch an Apple job detail page ONCE and return {'pay': ..., 'level': ...}."""
-    try:
-        resp = requests.get(
-            url, timeout=timeout,
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
-        resp.raise_for_status()
-        html = resp.text
-    except Exception as e:
-        logger.debug(f"Apple detail fetch failed for {url}: {e}")
+def _fetch_apple_detail_fields(position_id: str, locale: str = "en-us",
+                               fetcher: "_AppleFetcher | None" = None) -> dict:
+    """Read one posting's job data ONCE: {'pay': ..., 'level': ...}, or {}.
+
+    The JSON first. The job page is read only when the JSON answered but not
+    in the shape we know (Apple changed it): after a timeout the heavier page
+    would only add load to a server that is already slow."""
+    fetcher = fetcher or _AppleFetcher()
+    resp = fetcher.get(_APPLE_DETAIL_API.format(position_id=position_id))
+    refused = fetcher.answered_with
+    res = None
+    if resp is not None:
+        try:
+            res = resp.json().get("res")
+        except Exception as e:
+            if type(e).__name__ == "_ScrapeTimeout":
+                raise
+            res = None
+    if isinstance(res, dict) and (res.get("postingTitle") or res.get("jobSummary")):
+        # The level first: str-checked titles, so it cannot raise. Only the
+        # top level is checked above; a nested pay value of another type (a
+        # null footer, localizations as a list, selectedLocation as a string)
+        # raised AttributeError, which left scrape_apple and ended the whole
+        # ATS phase. Now that posting just has no pay; it keeps its level,
+        # and no page is read, since the JSON answered and the server may be
+        # slow.
+        low, high = res.get("lowJobTitle"), res.get("highJobTitle")
+        level = format_apple_level(low if isinstance(low, str) else "",
+                                   high if isinstance(high, str) else "")
+        try:
+            pay = _apple_pay_from_json(res)
+        except Exception as e:
+            if type(e).__name__ == "_ScrapeTimeout":
+                raise
+            logger.debug(f"Apple pay for {position_id} in an unexpected shape: {e!r}")
+            pay = ""
+        return {"pay": pay, "level": level}
+    if resp is None and not refused:
         return {}
-    import time as _time
-    _time.sleep(0.5)  # be polite between detail fetches
+    page = fetcher.get(f"https://jobs.apple.com/{locale}/details/{position_id}")
+    if page is None:
+        return {}
+    html = page.text
     return {"pay": _apple_pay_section(html),
             "level": format_apple_level(*extract_apple_levels(html))}
 
 
-def _fetch_apple_job_detail(url: str, timeout: int = 15) -> str:
-    """Pay & Benefits text only (kept for existing callers)."""
-    return _fetch_apple_detail_fields(url, timeout).get("pay", "")
+def _apple_pay_from_json(res: dict) -> str:
+    """The Pay & Benefits footer of the posting's job data, as plain text.
+    Pay differs by location; the location the job page opens on comes first,
+    as on the page."""
+    import html as _html
+    footers = res.get("postingFooters") or []
+    selected = (res.get("selectedLocation") or {}).get("id")
+    footers = sorted(footers, key=lambda f: f.get("postLocationId") != selected)
+    for footer in footers:
+        for items in (footer.get("localizations") or {}).values():
+            for item in items or []:
+                content = item.get("content") or ""
+                if "$" not in content:
+                    continue  # some markets omit pay
+                text = re.sub(r"<[^>]+>", " ", content)
+                text = re.sub(r"\s+", " ", _html.unescape(text)).strip()
+                return f"{item.get('name') or 'Pay & Benefits'}: {text}"
+    return ""
 
 
 def _apple_pay_section(html: str) -> str:
@@ -326,18 +528,28 @@ def _apple_pay_section(html: str) -> str:
 
 def _extract_apple_hydration(html: str) -> list[dict]:
     """Extract searchResults from Apple's SSR hydration data in HTML."""
-    match = re.search(r'JSON\.parse\("(.+?)"\)', html)
+    # The argument is a JS string literal: read it to its real closing quote,
+    # skipping escaped characters. The lazy '(.+?)")' stopped at the first
+    # '")' in a posting text ('the \"Studio\")') and the page parsed to 0 rows.
+    match = re.search(r'JSON\.parse\("((?:[^"\\]|\\.)*)"\)', html or "", re.S)
     if not match:
         return []
 
     try:
-        raw = match.group(1).encode().decode("unicode_escape")
+        # The argument is a JS string literal; reading it as JSON keeps
+        # non-ASCII intact. unicode_escape read the UTF-8 bytes as Latin-1:
+        # an en dash in a title ("Producer – Video") was stored as "Producer â".
+        try:
+            raw = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            raw = match.group(1).encode().decode("unicode_escape")
         data = json.loads(raw)
         loader_data = data.get("loaderData", {})
         # The search route contains searchResults
         for route_data in loader_data.values():
             if isinstance(route_data, dict) and "searchResults" in route_data:
-                return route_data["searchResults"]
+                found = route_data["searchResults"]
+                return found if isinstance(found, list) else []
     except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as e:
         logger.debug(f"Apple hydration parse error: {e}")
 

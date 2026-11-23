@@ -56,6 +56,19 @@ def _no_real_anthropic_calls(monkeypatch):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _no_real_posting_page_fetches(monkeypatch):
+    """HERMETIC-TESTS GUARD. generate_package looks up the
+    posting text of a job listed without it, and posting_text reads the job's
+    own page for that. Unit tests never reach a job site: the page read
+    returns "" unless a test patches it (tests/test_posting_text.py overrides
+    this fixture to test the real reader against mocked responses)."""
+    try:
+        monkeypatch.setattr("job_agent.posting_text.fetch_posting_text", lambda link: "")
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def tmp_db(tmp_path):
     """Provide a temporary SQLite database for testing."""

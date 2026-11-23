@@ -9,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .ats_scraper import _matches_keywords
-from .scraper_productionhub import scrape_productionhub
+from .scraper_productionhub import _fetch_stealth, scrape_productionhub
 from .scraper_hitmarker import scrape_hitmarker
 from .scraper_builtin import scrape_builtin
 
@@ -27,8 +27,18 @@ REQUEST_TIMEOUT = 15
 INTER_REQUEST_DELAY = 0.5  # seconds between requests to same domain
 
 
-def _fetch_page(url: str) -> BeautifulSoup | None:
-    """Fetch a URL and return parsed BeautifulSoup, or None on error."""
+def _fetch_page(url: str, stealth: bool = False, solve_cloudflare: bool = True,
+                wait_selector: str | None = None) -> BeautifulSoup | None:
+    """Fetch a URL and return parsed BeautifulSoup, or None on error.
+
+    stealth=True goes through the stealth browser instead: MBW and DoorsOpen
+    answer a plain request with 403, so trying requests
+    first would only add a wasted round trip. solve_cloudflare and
+    wait_selector are passed to scraper_productionhub._fetch_stealth.
+    """
+    if stealth:
+        return _fetch_stealth(url, solve_cloudflare=solve_cloudflare,
+                              wait_selector=wait_selector)
     try:
         resp = _session.get(url, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
@@ -72,15 +82,15 @@ def scrape_showbizjobs(
             if soup is None:
                 break
 
-            # ShowbizJobs uses table#postings with tr rows
-            table = soup.find("table", id="postings")
-            if not table:
-                # Try alternate: div-based listing
-                rows = soup.select("div.job-listing, tr.job-row, div.listing")
-                if not rows:
-                    break
-            else:
-                rows = table.find_all("tr")
+            # Current markup (after a redesign): each posting is an
+            # <a class="jl-list-item"> with div.jl-list-title / -company and
+            # jl-list-col-location / -date columns. The old table#postings
+            # markup is kept as a fallback; on its own it finds nothing.
+            rows = soup.select("a.jl-list-item")
+            if not rows:
+                table = soup.find("table", id="postings")
+                rows = table.find_all("tr") if table else soup.select(
+                    "div.job-listing, tr.job-row, div.listing")
 
             if not rows:
                 break
@@ -88,16 +98,18 @@ def scrape_showbizjobs(
             found_any = False
             for row in rows:
                 try:
-                    # Title from h5 > a
-                    title_el = row.find("h5")
-                    if not title_el:
-                        continue
-                    title_link = title_el.find("a")
-                    if not title_link:
-                        continue
-
-                    title = title_link.get_text(strip=True)
-                    href = title_link.get("href", "")
+                    if row.name == "a":
+                        title_el = row.select_one("div.jl-list-title")
+                        title = title_el.get_text(strip=True) if title_el else ""
+                        href = row.get("href", "")
+                    else:
+                        # Legacy table row: title from h5 > a
+                        title_el = row.find("h5")
+                        title_link = title_el.find("a") if title_el else None
+                        if not title_link:
+                            continue
+                        title = title_link.get_text(strip=True)
+                        href = title_link.get("href", "")
                     if href and not href.startswith("http"):
                         href = f"https://www.showbizjobs.com{href}"
 
@@ -112,26 +124,30 @@ def scrape_showbizjobs(
                     if not _matches_keywords(title, keywords):
                         continue
 
-                    # Company from h6 > a (first h6)
                     company = ""
-                    h6_tags = row.find_all("h6")
-                    if h6_tags:
-                        company_link = h6_tags[0].find("a")
-                        if company_link:
-                            company = company_link.get_text(strip=True)
-                        else:
-                            company = h6_tags[0].get_text(strip=True)
-
-                    # Location: text content in td elements
                     location = ""
-                    tds = row.find_all("td")
-                    for td in tds:
-                        text = td.get_text(strip=True)
-                        # Location patterns: "City, State" or state abbreviations
-                        if any(s in text for s in [", ", "Remote", "CA", "NY", "TX"]):
-                            if text != title and text != company:
-                                location = text
-                                break
+                    date_posted = ""
+                    if row.name == "a":
+                        company_el = row.select_one("div.jl-list-company")
+                        company = company_el.get_text(strip=True) if company_el else ""
+                        loc_el = row.select_one("div.jl-list-col-location")
+                        location = loc_el.get_text(" ", strip=True) if loc_el else ""
+                        date_el = row.select_one("div.jl-list-col-date")
+                        if date_el:
+                            # "Today", "2d ago", "1w ago" or "Oct 16"
+                            date_posted = parse_posted_date(date_el.get_text(strip=True))
+                    else:
+                        # Legacy: company from the first h6, location from a td
+                        h6_tags = row.find_all("h6")
+                        if h6_tags:
+                            company_link = h6_tags[0].find("a")
+                            company = (company_link or h6_tags[0]).get_text(strip=True)
+                        for td in row.find_all("td"):
+                            text = td.get_text(strip=True)
+                            if any(s in text for s in [", ", "Remote", "CA", "NY", "TX"]):
+                                if text != title and text != company:
+                                    location = text
+                                    break
 
                     seen_urls.add(href)
 
@@ -141,7 +157,7 @@ def scrape_showbizjobs(
                         "location": location,
                         "job_url": href,
                         "description": "",
-                        "date_posted": "",
+                        "date_posted": date_posted,
                         "site": "showbizjobs",
                         "department": cat,
                     })
@@ -176,47 +192,46 @@ def scrape_podnews(keywords: list[str]) -> list[dict]:
         return []
 
     results = []
+    seen_urls: set[str] = set()
 
-    # Podnews uses div.artblock for each job listing
-    blocks = soup.select("div.artblock")
-    if not blocks:
-        # Fallback: look for article or link-based patterns
-        blocks = soup.select("article, div.job-item, div.post")
-
-    for block in blocks:
+    # Each posting is a text link to /job/<company>/<slug>, followed by
+    # ", Company", a <br> and a flag + location line. The old div.artblock
+    # wrappers are gone: the page has no per-job container
+    # any more, so the job link itself is the anchor point. The logo link to
+    # the same URL carries no text and is skipped.
+    for link_el in soup.find_all("a", href=lambda h: h and "/job/" in h):
         try:
-            # Title + link from a[href^="/job/"]
-            link_el = block.find("a", href=lambda h: h and "/job/" in h)
-            if not link_el:
-                continue
-
             title = link_el.get_text(strip=True)
             href = link_el.get("href", "")
             if href and not href.startswith("http"):
                 href = f"https://podnews.net{href}"
 
-            if not title:
+            if not title or href in seen_urls:
                 continue
+            seen_urls.add(href)
 
             if not _matches_keywords(title, keywords):
                 continue
 
-            # Company: text after title, often comma-separated
             company = ""
-            block_text = block.get_text(separator="\n", strip=True)
-            lines = [l.strip() for l in block_text.split("\n") if l.strip()]
-            # Company is typically the line after the title
-            for i, line in enumerate(lines):
-                if line == title and i + 1 < len(lines):
-                    company = lines[i + 1].strip(" ,")
-                    break
-
-            # Location: look for flag emoji or location text
             location = ""
-            for line in lines:
-                if any(flag in line for flag in ["\U0001f1fa\U0001f1f8", "US", "UK", "Remote", "CA", "NY"]):
-                    location = line.strip()
-                    break
+            sib = link_el.next_sibling
+            if isinstance(sib, str):
+                company = sib.strip().strip(",").strip()
+            if not company:
+                nxt = link_el.find_next_sibling()
+                if nxt is not None and nxt.name in ("span", "div"):
+                    company = nxt.get_text(strip=True)
+            br = link_el.find_next_sibling("br")
+            if br is not None:
+                parts = []
+                for node in br.next_siblings:
+                    if getattr(node, "name", None) in ("a", "br", "div"):
+                        break  # the next posting starts
+                    text = node.get_text(" ", strip=True) if hasattr(node, "get_text") else str(node).strip()
+                    if text:
+                        parts.append(text)
+                location = " ".join(parts)
 
             results.append({
                 "title": title,
@@ -241,11 +256,14 @@ def scrape_podnews(keywords: list[str]) -> list[dict]:
 # 3. Music Business Worldwide
 # =============================================================================
 
-def scrape_mbw(keywords: list[str], max_pages: int = 5) -> list[dict]:
+def scrape_mbw(keywords: list[str], max_pages: int = 1) -> list[dict]:
     """
     Scrape MusicBusinessWorldwide.com/jobs for music industry jobs.
 
-    WordPress job listing with pagination via /jobs/page/N/.
+    Behind a Cloudflare challenge (plain requests get 403), so every page is a
+    ~10-20s stealth-browser fetch. The jobs page shows its ~40 current
+    postings with no pagination links, hence one page by default;
+    /jobs/page/N/ is the old WordPress pattern.
     """
     results = []
     seen_urls = set()
@@ -256,12 +274,16 @@ def scrape_mbw(keywords: list[str], max_pages: int = 5) -> list[dict]:
         else:
             url = f"https://www.musicbusinessworldwide.com/jobs/page/{page}/"
 
-        soup = _fetch_page(url)
+        soup = _fetch_page(url, stealth=True, wait_selector="li.post-card")
         if soup is None:
             break
 
-        # WordPress job listings: li items with job links
-        job_items = soup.select("li.job_listing, li.type-job_listing, div.job_listing")
+        # Current markup (Avada theme): li.post-card, title / company /
+        # location in div.fusion-text-1 / -2 / -3. Legacy WordPress
+        # job_listing items kept as a fallback.
+        job_items = soup.select("li.post-card")
+        if not job_items:
+            job_items = soup.select("li.job_listing, li.type-job_listing, div.job_listing")
         if not job_items:
             # Broader fallback
             job_items = soup.select("article, li.listing")
@@ -272,16 +294,28 @@ def scrape_mbw(keywords: list[str], max_pages: int = 5) -> list[dict]:
         found_any = False
         for item in job_items:
             try:
-                # Title from a > strong or a with job link
-                title_el = item.find("a")
-                if not title_el:
-                    continue
+                card_title = item.select_one("div.fusion-text-1")
+                if card_title is not None:
+                    link_el = item.find("a", href=lambda h: h and "/jobs/job/" in h)
+                    title = card_title.get_text(strip=True)
+                    href = link_el.get("href", "") if link_el else ""
+                    company_el = item.select_one("div.fusion-text-2")
+                    loc_el = item.select_one("div.fusion-text-3")
+                    company = company_el.get_text(strip=True) if company_el else ""
+                    location = loc_el.get_text(strip=True) if loc_el else ""
+                else:
+                    # Legacy: title from a > strong, company/location from
+                    # the following links
+                    title_el = item.find("a")
+                    if not title_el:
+                        continue
+                    strong = title_el.find("strong")
+                    title = (strong or title_el).get_text(strip=True)
+                    href = title_el.get("href", "")
+                    all_links = item.find_all("a")
+                    company = all_links[1].get_text(strip=True) if len(all_links) >= 2 else ""
+                    location = all_links[2].get_text(strip=True) if len(all_links) >= 3 else ""
 
-                # Check for strong tag inside (common WP pattern)
-                strong = title_el.find("strong")
-                title = strong.get_text(strip=True) if strong else title_el.get_text(strip=True)
-
-                href = title_el.get("href", "")
                 if not title or not href or href in seen_urls:
                     continue
 
@@ -289,15 +323,6 @@ def scrape_mbw(keywords: list[str], max_pages: int = 5) -> list[dict]:
 
                 if not _matches_keywords(title, keywords):
                     continue
-
-                # Company and location from subsequent <a> tags or text
-                company = ""
-                location = ""
-                all_links = item.find_all("a")
-                if len(all_links) >= 2:
-                    company = all_links[1].get_text(strip=True)
-                if len(all_links) >= 3:
-                    location = all_links[2].get_text(strip=True)
 
                 seen_urls.add(href)
 
@@ -333,7 +358,10 @@ def scrape_doorsopen(keywords: list[str], max_pages: int = 3) -> list[dict]:
     """
     Scrape DoorsOpen.co/jobs for entertainment industry jobs.
 
-    Uses article.listing-item structure with pagination.
+    Uses article.listing-item structure with pagination. The site's nginx
+    answers plain requests with 403; the stealth browser
+    gets the page (no Cloudflare challenge, ~4s). Its postings are almost all
+    UK / EU, so the location gate drops most of them downstream.
     """
     results = []
     seen_urls = set()
@@ -344,7 +372,10 @@ def scrape_doorsopen(keywords: list[str], max_pages: int = 3) -> list[dict]:
         else:
             url = f"https://www.doorsopen.co/jobs/?page={page}"
 
-        soup = _fetch_page(url)
+        # No Cloudflare challenge here — only an nginx rule against plain
+        # clients — so the solver is skipped (it logs an ERROR when it finds
+        # no challenge).
+        soup = _fetch_page(url, stealth=True, solve_cloudflare=False)
         if soup is None:
             break
 
@@ -359,10 +390,12 @@ def scrape_doorsopen(keywords: list[str], max_pages: int = 3) -> list[dict]:
         found_any = False
         for article in articles:
             try:
-                # Title from heading link (legacy) or the card's primary
-                # anchor (current markup: title is plain link text — selector
-                # rot had this source silently at 0 rows).
-                title_el = article.select_one("h4.listing-item__title a, h3 a, h4 a, a.job-title")
+                # Current markup: div.listing-item__title > a (legacy: a
+                # heading link). The card's first bare anchor is the logo
+                # link, which has no text — falling back to it is what had
+                # this source silently at 0 rows.
+                title_el = article.select_one(
+                    ".listing-item__title a, h3 a, h4 a, a.job-title")
                 if not title_el:
                     title_el = article.find("a", href=True)
                 if not title_el:
@@ -376,27 +409,31 @@ def scrape_doorsopen(keywords: list[str], max_pages: int = 3) -> list[dict]:
                 if not title or href in seen_urls:
                     continue
 
+                seen_urls.add(href)
+                found_any = True  # new card parsed — drives pagination, not matching
+
                 if not _matches_keywords(title, keywords):
                     continue
 
-                # Company + Location from listing-item__info--item
-                info_items = article.select("li.listing-item__info--item, span.company, span.location")
+                # Company + Location: span (current) or li (legacy)
+                # .listing-item__info--item
+                info_items = article.select(".listing-item__info--item, span.company, span.location")
                 company = info_items[0].get_text(strip=True) if len(info_items) >= 1 else ""
                 location = info_items[1].get_text(strip=True) if len(info_items) >= 2 else ""
 
-                # Date
+                # Date ("Mar 4, 2026" on the current page)
                 date_el = article.select_one(".listing-item__date, time, span.date")
-                date_posted = date_el.get_text(strip=True) if date_el else ""
+                date_posted = parse_posted_date(date_el.get_text(strip=True)) if date_el else ""
 
-                seen_urls.add(href)
-                found_any = True
+                desc_el = article.select_one(".listing-item__desc")
+                description = desc_el.get_text(" ", strip=True) if desc_el else ""
 
                 results.append({
                     "title": title,
                     "company": company,
                     "location": location,
                     "job_url": href,
-                    "description": "",
+                    "description": description,
                     "date_posted": date_posted,
                     "site": "doorsopen",
                     "department": "",
@@ -514,7 +551,10 @@ def scrape_remotegamejobs(keywords: list[str]) -> list[dict]:
     """
     Scrape RemoteGameJobs.com for remote gaming industry jobs.
 
-    Single page with div.job-box items.
+    Single page (~33 newest postings). Since the redesign each posting is an
+    <a class="card"> with the title in div.title > h3, the company in div.sub
+    and the region in span.scope; the old div.job-box markup (kept as a
+    fallback) finds nothing on the current page.
     """
     url = "https://remotegamejobs.com/"
     soup = _fetch_page(url)
@@ -523,18 +563,15 @@ def scrape_remotegamejobs(keywords: list[str]) -> list[dict]:
 
     results = []
 
-    # Job listings in div.job-box or similar containers
-    boxes = soup.select("div.job-box, div.job-card, article.job, div.job-listing")
+    boxes = soup.select("a.card")
     if not boxes:
-        # Broader fallback
-        boxes = soup.select("div.job, li.job, div.listing")
+        # Legacy markup
+        boxes = soup.select("div.job-box, div.job-card, article.job, div.job-listing")
 
     for box in boxes:
         try:
-            # Title from heading (legacy markup) or <strong> inside the card
-            # link (current markup: cards carry no headings — selector rot had
-            # this source silently at 0 rows).
-            title_el = box.find(["h2", "h3", "h4"]) or box.select_one("a strong")
+            title_el = (box.select_one("div.title h3") or box.find(["h2", "h3", "h4"])
+                        or box.select_one("a strong"))
             if not title_el:
                 continue
 
@@ -545,35 +582,30 @@ def scrape_remotegamejobs(keywords: list[str]) -> list[dict]:
             if not _matches_keywords(title, keywords):
                 continue
 
-            # Link
-            link_el = box.find("a", href=True)
-            href = link_el.get("href", "") if link_el else ""
+            # The card itself is the link on the current markup
+            if box.name == "a":
+                href = box.get("href", "")
+            else:
+                link_el = box.find("a", href=True)
+                href = link_el.get("href", "") if link_el else ""
             if href and not href.startswith("http"):
                 href = f"https://remotegamejobs.com{href}"
 
-            # Company: current markup lists (title, company, worktype) as the
-            # info-column strings; legacy selectors kept as fallback.
             company = ""
-            col = box.select_one("div.column")
-            if col:
-                strings = [t.strip() for t in col.stripped_strings if t.strip()]
-                if len(strings) >= 2 and strings[0] == title:
-                    company = strings[1]
-            if not company:
-                company_el = box.select_one("span.company, div.company, p.company")
-                if company_el:
-                    company = company_el.get_text(strip=True)
-                else:
-                    for el in box.find_all(["span", "div", "p"]):
-                        text = el.get_text(strip=True)
-                        if text and text != title and len(text) < 80:
-                            company = text
-                            break
+            company_el = box.select_one("div.sub, span.company, div.company, p.company")
+            if company_el:
+                company = company_el.get_text(strip=True)
+
+            # "Remote" alone says nothing about where the candidate may work from; the
+            # card names the allowed region ("Worldwide", "USA", "Europe").
+            scope_el = box.select_one("span.scope")
+            scope = scope_el.get_text(" ", strip=True) if scope_el else ""
+            location = "Remote" if not scope or scope.lower() == "remote" else f"Remote ({scope})"
 
             results.append({
                 "title": title,
                 "company": company,
-                "location": "Remote",
+                "location": location,
                 "job_url": href,
                 "description": "",
                 "date_posted": "",
@@ -601,6 +633,9 @@ WILLHIRE_BASE = "https://applecontingentworkforce.willhire.co"
 _REL_AGO_RE = re.compile(
     r"^(an?|\d+)\s+(minute|min|hour|hr|day|week|month)s?\s+ago$", re.I)
 _REL_UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
+# ShowbizJobs' short forms: "2d ago", "1w ago", "3h ago"
+_SHORT_AGO_RE = re.compile(r"^(\d+)\s*([hdw])\s+ago$", re.I)
+_SHORT_UNIT = {"h": "hour", "d": "day", "w": "week"}
 
 
 def parse_posted_date(text: str, now: datetime | None = None) -> str:
@@ -616,9 +651,13 @@ def parse_posted_date(text: str, now: datetime | None = None) -> str:
     if low == "yesterday":
         return (now - timedelta(days=1)).strftime("%Y-%m-%d")
     m = _REL_AGO_RE.match(low)
-    if m:
-        n = 1 if m.group(1) in ("a", "an") else int(m.group(1))
-        unit = m.group(2).lower()
+    short = _SHORT_AGO_RE.match(low)
+    if m or short:
+        if m:
+            n = 1 if m.group(1) in ("a", "an") else int(m.group(1))
+            unit = m.group(2).lower()
+        else:
+            n, unit = int(short.group(1)), _SHORT_UNIT[short.group(2).lower()]
         if unit in ("minute", "min", "hour", "hr"):
             delta = timedelta(minutes=n) if unit in ("minute", "min") else timedelta(hours=n)
         else:
@@ -629,6 +668,15 @@ def parse_posted_date(text: str, now: datetime | None = None) -> str:
             return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
+    # "Oct 16" (ShowbizJobs, older postings): this year, or last year when
+    # that date is still ahead of today.
+    try:
+        d = datetime.strptime(f"{raw} {now.year}", "%b %d %Y")
+        if d.date() > now.date():
+            d = d.replace(year=now.year - 1)
+        return d.strftime("%Y-%m-%d")
+    except ValueError:
+        pass
     return raw
 
 
@@ -829,6 +877,11 @@ def scrape_industry_html_boards(
                 # unnoticed). WARN so it shows in logs/digests, not just INFO.
                 logger.warning(f"Industry scraper {name}: 0 jobs — possible selector rot or dry source")
         except Exception as e:
+            # main.py's phase budget (SIGALRM) arrives as _ScrapeTimeout: let
+            # it end the phase instead of moving on to the next board without
+            # a timer. Matched by name: importing main here would be circular.
+            if type(e).__name__ == "_ScrapeTimeout":
+                raise
             logger.warning(f"Industry scraper {name} failed: {e}")
 
     if progress_callback:

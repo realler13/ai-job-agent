@@ -15,6 +15,32 @@ const SENT_CV_OPTIONS: { value: SentCvAnswer; label: string }[] = [
 ]
 
 /**
+ * One plain sentence when the documents were made without the posting text.
+ * generate_package then ships the general CV (states.input) and the standard
+ * letter (cl.state), and says so only in the JSON audit, which this panel
+ * does not show: without this line the "review recommended" badge had no why.
+ * Older packages have a general CV with a model-written letter, so each
+ * document is named only when its own audit says so.
+ */
+function thinPostingNote(auditSummary: string | null): string | null {
+  if (!auditSummary || !auditSummary.startsWith('{')) return null
+  let audit: { states?: { input?: string }; jd_chars?: number; cl?: { state?: string } }
+  try {
+    audit = JSON.parse(auditSummary)
+  } catch {
+    return null
+  }
+  const generalCv = audit?.states?.input === 'input_incomplete'
+  const standardLetter = audit?.cl?.state === 'input_incomplete'
+  if (!generalCv && !standardLetter) return null
+  const posting = audit.jd_chars === 0 ? 'The posting had no text' : 'The posting had too little text'
+  if (generalCv && standardLetter) {
+    return `${posting}, so this is the general CV and a standard cover letter.`
+  }
+  return generalCv ? `${posting}, so this is the general CV.` : `${posting}, so this is a standard cover letter.`
+}
+
+/**
  * Minimal shape that DocumentPanel needs. This allows both a full Job object
  * and the flat jobLike objects that Kanban constructs from FlatApplication rows.
  */
@@ -100,6 +126,7 @@ export function DocumentPanel({
   const cvQualityFlag = job.cv_quality_flag ?? null
   const cvDomainUsed = ('cv_domain_used' in job ? job.cv_domain_used : null) ?? null
   const cvAuditSummary = ('cv_audit_summary' in job ? job.cv_audit_summary : null) ?? null
+  const thinNote = hasCv || hasCl ? thinPostingNote(cvAuditSummary) : null
 
   const handleGenerate = async () => {
     if (!onGenerate) return
@@ -182,6 +209,8 @@ export function DocumentPanel({
           )}
         </div>
       )}
+
+      {thinNote && <p className="text-sm text-muted-foreground">{thinNote}</p>}
 
       {/* One click, no required step: which CV actually went out. */}
       {askSentCv && (

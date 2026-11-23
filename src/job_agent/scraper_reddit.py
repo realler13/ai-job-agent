@@ -10,8 +10,9 @@ to .env:
     REDDIT_CLIENT_SECRET=...
     REDDIT_USER_AGENT="AIJobAgent/1.0 (by /u/{username})"
 
-If the env vars aren't set, scrape_reddit() returns [] with a warning — the
-scheduled run won't fail. Once credentials are added, Reddit jumps in automatically.
+If the env vars aren't set, scrape_reddit() returns [] at once (INFO log) —
+the scheduled run won't fail. Once credentials are added, Reddit jumps in
+automatically.
 
 Filtering strategy (cut freelance/junk, keep FT producer roles):
   1. Flair / title must be [HIRING] (not [FOR HIRE])
@@ -62,10 +63,17 @@ def _reddit_client():
     cid = os.getenv("REDDIT_CLIENT_ID")
     csec = os.getenv("REDDIT_CLIENT_SECRET")
     ua = os.getenv("REDDIT_USER_AGENT")
+    if not (cid or csec or ua):
+        # Not set up is a normal state. INFO, not WARNING: a warning on every
+        # run for a source nobody enabled is noise that hides the warnings
+        # that matter.
+        logger.info("Reddit: no credentials configured — skipping.")
+        return None
     if not (cid and csec and ua):
+        # Half-configured is a real mistake worth a warning.
         logger.warning(
-            "Reddit: credentials not configured "
-            "(REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USER_AGENT). Skipping."
+            "Reddit: credentials incomplete "
+            "(need REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET and REDDIT_USER_AGENT). Skipping."
         )
         return None
     try:

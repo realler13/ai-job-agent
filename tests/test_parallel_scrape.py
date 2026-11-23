@@ -169,3 +169,37 @@ def test_daemon_thread_timeout_does_not_block(monkeypatch):
     # the abandoned thread must be a daemon (never blocks interpreter exit)
     hung = [t for t in threading.enumerate() if t.name.startswith("scrape-hang")]
     assert all(t.daemon for t in hung)
+
+
+def test_tripped_breaker_skips_only_its_own_site(monkeypatch):
+    """breakers= is per site: an open LinkedIn breaker (tripped earlier in the
+    run) sends only its one probe request at the start of the pass (still
+    bad here, so it stays open), and Indeed's worker is untouched."""
+    from job_agent.main import _SiteBreaker
+
+    calls = []
+    lock = threading.Lock()
+
+    def fake_scrape(site_name=None, search_term=None, **kw):
+        with lock:
+            calls.append((site_name[0], search_term))
+        if site_name[0] == "linkedin":
+            return pd.DataFrame()
+        return _df(f"{site_name[0]}-{search_term}")
+
+    breaker = _SiteBreaker("linkedin", 1)
+    breaker.record(False)                       # already open
+    monkeypatch.setattr(main_mod, "scrape_jobs", fake_scrape)
+    all_jobs: list = []
+    _parallel_jobspy_pass(
+        ["linkedin", "indeed"], ["kw1", "kw2"],
+        lambda site, keyword: dict(site_name=[site], search_term=keyword),
+        session=_FakeSession(), control_flags=None,
+        progress_callback=lambda *a, **k: None,
+        db=_FakeDB(), all_jobs=all_jobs, limit=None,
+        label="remote", base_pct=0.1, logger=logger,
+        breakers={"linkedin": breaker},
+    )
+    assert sorted(calls) == [("indeed", "kw1"), ("indeed", "kw2"), ("linkedin", "kw1")]
+    assert breaker.skipped == {"remote": 1}
+    assert breaker.tripped and breaker.probes == 1

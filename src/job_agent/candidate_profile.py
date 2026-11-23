@@ -207,6 +207,42 @@ def apple_target_band(profile: Profile | None = None) -> tuple[int, int] | None:
     return low, high
 
 
+def glassdoor_city_id(profile: Profile | None = None) -> tuple[str, int] | None:
+    """(type, id) of the home city's Glassdoor location, or None.
+
+    Read from ``search.glassdoor_city_id: {type: C, id: <locId>}``. Glassdoor
+    ignores a typed location (``locKeyword``) and returns the nationwide
+    results; only its own location id narrows a search to one place. The id is
+    the ``locId`` of a Glassdoor search for the city (``locT`` is its type: C
+    for a city). There is no default: without the key Glassdoor is searched
+    nationwide only. A malformed value fails loudly, because a wrong id would
+    quietly search some other place every run.
+    """
+    search = (profile or PROFILE).get("search") or {}
+    value = search.get("glassdoor_city_id")
+    if value is None:
+        return None
+    source = (profile or PROFILE).source
+    example = "e.g. {type: C, id: <the locId of a Glassdoor search for your city>}"
+    try:
+        loc_type = str(value.get("type", "C")).strip().upper()
+        raw_id = value["id"]
+        if isinstance(raw_id, (bool, float)):
+            raise ValueError
+        loc_id = int(str(raw_id).strip())
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise ValueError(
+            f"search.glassdoor_city_id in {source} must be a mapping with a whole-number "
+            f"'id' (and optionally a 'type'), {example}."
+        ) from None
+    if loc_id <= 0 or not (len(loc_type) == 1 and loc_type.isalpha()):
+        raise ValueError(
+            f"search.glassdoor_city_id in {source} must have a positive 'id' and a one-letter "
+            f"'type' (got type={loc_type!r}, id={loc_id}), {example}."
+        )
+    return loc_type, loc_id
+
+
 def letter_template(profile: Profile | None = None) -> dict:
     """The profile's ``letter_template`` section, checked and as plain values.
 

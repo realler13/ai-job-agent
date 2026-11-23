@@ -493,7 +493,7 @@ class TestScrapeDoorsopen:
         assert results[0]["title"] == "Video Producer"
         assert results[0]["company"] == "Hulu"
         assert results[0]["location"] == "Santa Monica, CA"
-        assert results[0]["date_posted"] == "January 15, 2026"
+        assert results[0]["date_posted"] == "2026-01-15"  # parsed at scrape time
         assert results[0]["site"] == "doorsopen"
         assert "doorsopen.co" in results[0]["job_url"]
 
@@ -611,6 +611,12 @@ class TestWillhireDates:
         ("2026-09-30", "2026-09-30"),
         ("", ""),
         ("Posted recently", "Posted recently"),  # unknown text is kept, not guessed
+        # ShowbizJobs' short forms
+        ("2d ago", "2026-10-02"),
+        ("1w ago", "2026-09-27"),
+        ("Oct 1", "2026-10-01"),
+        ("Dec 20", "2025-12-20"),          # a date still ahead of today is last year's
+        ("Mar 4, 2026", "2026-03-04"),     # DoorsOpen
     ])
     def test_parse_posted_date(self, raw, expected):
         from datetime import datetime
@@ -974,3 +980,391 @@ class TestAquentFeed:
         assert "<" not in sea["description"]
         assert "Temporary via Aquent" in sea["description"]
         assert "$50/hr" in sea["description"]
+
+
+# ============================================================
+# Current markup of the boards (after their redesigns). Each sample follows
+# the live page's structure; the companies and postings are made up.
+# ============================================================
+
+def _soup(html):
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(html, "html.parser")
+
+
+class TestShowbizjobsCurrentMarkup:
+    HTML = """<html><body>
+    <a class="jl-list-item" href="/jobs/brightkettle-content-producer-remote/jid-rn90p3g">
+      <img alt="Brightkettle Studios logo" class="jl-list-logo" src="x.png"/>
+      <div class="jl-list-col jl-list-col-main">
+        <div class="jl-list-title">Content Producer, Morning Desk</div>
+        <div class="jl-list-company">Brightkettle Studios</div>
+      </div>
+      <div class="jl-list-col jl-list-col-location">
+        <span class="jl-card-tag loc"><i class="fas fa-building-user"></i> Hybrid (Washington, DC)</span>
+      </div>
+      <div class="jl-list-col jl-list-col-type"><span class="jl-card-tag">Full Time</span></div>
+      <div class="jl-list-col jl-list-col-date">2d ago</div>
+    </a>
+    <a class="jl-list-item" href="/jobs/owlbridge-staff-accountant/jid-g6xv99g">
+      <div class="jl-list-col jl-list-col-main">
+        <div class="jl-list-title">Staff Accountant</div>
+        <div class="jl-list-company">Owlbridge Media</div>
+      </div>
+      <div class="jl-list-col jl-list-col-date">Today</div>
+    </a>
+    </body></html>"""
+
+    @patch("job_agent.scraper_industry_html._fetch_page")
+    def test_parses_list_items(self, mock_fetch):
+        from datetime import date, timedelta
+        from job_agent.scraper_industry_html import scrape_showbizjobs
+
+        mock_fetch.return_value = _soup(self.HTML)
+        results = scrape_showbizjobs(KEYWORDS, categories=["production-crew"], max_pages=1)
+
+        assert len(results) == 1
+        job = results[0]
+        assert job["title"] == "Content Producer, Morning Desk"
+        assert job["company"] == "Brightkettle Studios"
+        assert job["location"] == "Hybrid (Washington, DC)"
+        assert job["job_url"] == "https://www.showbizjobs.com/jobs/brightkettle-content-producer-remote/jid-rn90p3g"
+        assert job["date_posted"] == (date.today() - timedelta(days=2)).isoformat()
+
+    @patch("job_agent.scraper_industry_html._fetch_page")
+    def test_no_match_page_still_paginates(self, mock_fetch):
+        from job_agent.scraper_industry_html import scrape_showbizjobs
+
+        no_match = self.HTML.replace("Content Producer, Morning Desk", "Payroll Clerk")
+        mock_fetch.side_effect = [_soup(no_match), _soup(self.HTML.replace("jid-rn90p3g", "jid-new"))]
+        with patch("job_agent.scraper_industry_html.time.sleep"):
+            results = scrape_showbizjobs(KEYWORDS, categories=["production-crew"], max_pages=2)
+        assert mock_fetch.call_count == 2
+        assert [r["job_url"].rsplit("/", 1)[-1] for r in results] == ["jid-new"]
+
+
+class TestPodnewsCurrentMarkup:
+    HTML = """<html><body>
+    <div style="display:grid;grid-template-columns:75px auto;">
+     <div><a href="/job/harborwren-audio/executive-producer-editor"><img alt="Harborwren Audio" src="l.png"/></a></div>
+     <div>
+      <svg class="small-icon"></svg>
+      <a href="/job/harborwren-audio/executive-producer-editor">Podcast Producer / Editor</a>
+      , Harborwren Audio
+      <br/>
+      <img alt="US flag" src="https://podnews.net/static/flags/US.svg"/>
+      Remote, USA
+     </div>
+     <div></div>
+     <div>
+      <a href="/job/saltmarsh-radio-2/host-new-daily-show">Host - New Daily Show</a>
+      , Saltmarsh Radio
+      <br/>
+      <img alt="US flag" src="https://podnews.net/static/flags/US.svg"/>
+      Tacoma WA, USA
+     </div>
+     <div><a href="/job/quillnest/video-producer">Video Producer</a>, Quillnest Pictures<br/>London, UK</div>
+    </div>
+    </body></html>"""
+
+    @patch("job_agent.scraper_industry_html._fetch_page")
+    def test_parses_job_links(self, mock_fetch):
+        from job_agent.scraper_industry_html import scrape_podnews
+
+        mock_fetch.return_value = _soup(self.HTML)
+        results = scrape_podnews(KEYWORDS)
+
+        # The logo link (no text) is not a second copy of the first job
+        assert [r["title"] for r in results] == ["Podcast Producer / Editor", "Video Producer"]
+        first, second = results
+        assert first["company"] == "Harborwren Audio"
+        assert first["location"] == "Remote, USA"
+        assert first["job_url"] == "https://podnews.net/job/harborwren-audio/executive-producer-editor"
+        assert second["company"] == "Quillnest Pictures"
+        assert second["location"] == "London, UK"
+
+
+class TestMbwCurrentMarkup:
+    HTML = """<html><body><ul>
+    <li class="fusion-layout-column post-card fusion-grid-column">
+      <div class="fusion-image-element"><a class="fusion-no-lightbox" href="https://www.musicbusinessworldwide.com/jobs/job/9042/"><img/></a></div>
+      <div class="fusion-text fusion-text-1"><a href="https://www.musicbusinessworldwide.com/jobs/job/9042/">Content Producer</a></div>
+      <div class="fusion-text fusion-text-2"><a href="https://www.musicbusinessworldwide.com/jobs/company/fernlight-publishing/">fernlight publishing</a></div>
+      <div class="meta">
+        <div class="fusion-text fusion-text-3">Remote</div>
+        <div class="fusion-text fusion-text-4">Full Time / Expires: 14 Jan 2027</div>
+      </div>
+    </li>
+    <li class="fusion-layout-column post-card fusion-grid-column">
+      <div class="fusion-text fusion-text-1">Manager, Business Intelligence</div>
+      <div class="fusion-text fusion-text-2">EXAMPLE SERVICES, LLC</div>
+      <a href="https://www.musicbusinessworldwide.com/jobs/job/9034/">more</a>
+    </li>
+    </ul></body></html>"""
+
+    @patch("job_agent.scraper_industry_html._fetch_page")
+    def test_parses_post_cards_via_stealth(self, mock_fetch):
+        from job_agent.scraper_industry_html import scrape_mbw
+
+        mock_fetch.return_value = _soup(self.HTML)
+        with patch("job_agent.scraper_industry_html.time.sleep"):
+            results = scrape_mbw(KEYWORDS)
+
+        assert len(results) == 1
+        assert results[0]["title"] == "Content Producer"
+        assert results[0]["company"] == "fernlight publishing"
+        assert results[0]["location"] == "Remote"
+        assert results[0]["job_url"] == "https://www.musicbusinessworldwide.com/jobs/job/9042/"
+        # Behind Cloudflare: one stealth page, waiting for the real cards
+        mock_fetch.assert_called_once_with(
+            "https://www.musicbusinessworldwide.com/jobs/", stealth=True, wait_selector="li.post-card")
+
+
+class TestDoorsopenCurrentMarkup:
+    HTML = """<html><body>
+    <article class="media well listing-item listing-item__jobs">
+      <div class="media-left listing-item__logo">
+        <a href="https://www.doorsopen.co/job/20051/video-producer/"><img alt="Lumen Basement"/></a>
+      </div>
+      <div class="media-body">
+        <div class="media-right text-right">
+          <div class="listing-item__date">Mar 4, 2026</div>
+        </div>
+        <div class="media-heading listing-item__title">
+          <a class="link" href="https://www.doorsopen.co/job/20051/video-producer/">Video Producer</a>
+        </div>
+        <div class="listing-item__info clearfix">
+          <span class="listing-item__info--item listing-item__info--item-company">Lumen Basement</span>
+          <span class="listing-item__info--item listing-item__info--item-location">Hybrid (London, UK)</span>
+        </div>
+        <div class="listing-item__desc">WHO WE ARE Lumen Basement started in 2012.</div>
+      </div>
+    </article>
+    </body></html>"""
+
+    @patch("job_agent.scraper_industry_html._fetch_page")
+    def test_parses_title_link_not_logo(self, mock_fetch):
+        from job_agent.scraper_industry_html import scrape_doorsopen
+
+        mock_fetch.return_value = _soup(self.HTML)
+        with patch("job_agent.scraper_industry_html.time.sleep"):
+            results = scrape_doorsopen(KEYWORDS, max_pages=1)
+
+        assert len(results) == 1
+        job = results[0]
+        assert job["title"] == "Video Producer"
+        assert job["company"] == "Lumen Basement"
+        assert job["location"] == "Hybrid (London, UK)"
+        assert job["date_posted"] == "2026-03-04"
+        assert job["description"].startswith("WHO WE ARE")
+        # nginx blocks plain clients; there is no Cloudflare challenge to solve
+        mock_fetch.assert_called_once_with(
+            "https://www.doorsopen.co/jobs/", stealth=True, solve_cloudflare=False)
+
+    @patch("job_agent.scraper_industry_html._fetch_page")
+    def test_no_match_page_still_paginates(self, mock_fetch):
+        from job_agent.scraper_industry_html import scrape_doorsopen
+
+        no_match = self.HTML.replace(">Video Producer<", ">Bar Manager<")
+        mock_fetch.side_effect = [_soup(no_match), _soup(self.HTML.replace("20051", "20052"))]
+        with patch("job_agent.scraper_industry_html.time.sleep"):
+            results = scrape_doorsopen(KEYWORDS, max_pages=2)
+        assert mock_fetch.call_count == 2
+        assert [r["job_url"] for r in results] == ["https://www.doorsopen.co/job/20052/video-producer/"]
+
+
+class TestRemoteGameJobsCurrentMarkup:
+    HTML = """<html><body>
+    <a class="card" href="https://remotegamejobs.com/jobs/pebblewick-game-producer-remote-job">
+      <div class="logo">PW</div>
+      <div class="body">
+        <div class="title"><h3>Game Producer</h3><span class="pxb">New</span></div>
+        <div class="sub"><b>Pebblewick Games</b></div>
+        <div class="row">
+          <span class="scope"><span>USA</span></span>
+          <span class="chip chip-o">Production</span><span class="chip">Full-Time</span>
+        </div>
+      </div>
+    </a>
+    <a class="card" href="/jobs/thornfield-game-producer-remote-job">
+      <div class="body">
+        <div class="title"><h3>Senior Game Producer</h3></div>
+        <div class="sub"><b>Thornfield Interactive</b></div>
+        <div class="row"><span class="scope"><span>Remote</span></span></div>
+      </div>
+    </a>
+    <a class="card" href="/jobs/x-ui-artist">
+      <div class="body"><div class="title"><h3>UI Artist</h3></div><div class="sub"><b>X</b></div></div>
+    </a>
+    </body></html>"""
+
+    @patch("job_agent.scraper_industry_html._fetch_page")
+    def test_parses_cards(self, mock_fetch):
+        from job_agent.scraper_industry_html import scrape_remotegamejobs
+
+        mock_fetch.return_value = _soup(self.HTML)
+        results = scrape_remotegamejobs(KEYWORDS)
+
+        assert [r["title"] for r in results] == ["Game Producer", "Senior Game Producer"]
+        first, second = results
+        assert first["company"] == "Pebblewick Games"
+        assert first["location"] == "Remote (USA)"  # the allowed region reaches the location gate
+        assert first["job_url"] == "https://remotegamejobs.com/jobs/pebblewick-game-producer-remote-job"
+        assert second["location"] == "Remote"
+        assert second["job_url"] == "https://remotegamejobs.com/jobs/thornfield-game-producer-remote-job"
+
+
+class TestZeroYieldStillWarns:
+    """A board that parses nothing must keep saying so in the run log."""
+
+    def test_warning_per_empty_board(self, caplog):
+        from job_agent import scraper_industry_html as ih
+
+        names = ["scrape_showbizjobs", "scrape_podnews", "scrape_mbw", "scrape_doorsopen",
+                 "scrape_digilogue", "scrape_remotegamejobs", "scrape_willhire", "scrape_apmg",
+                 "scrape_productionhub", "scrape_hitmarker", "scrape_builtin"]
+        patches = [patch.object(ih, n, return_value=[]) for n in names]
+        for p_ in patches:
+            p_.start()
+        try:
+            with caplog.at_level("WARNING", logger="job_agent.scraper_industry_html"):
+                assert ih.scrape_industry_html_boards(KEYWORDS).empty
+        finally:
+            for p_ in patches:
+                p_.stop()
+        warned = [r.getMessage() for r in caplog.records
+                  if "0 jobs — possible selector rot or dry source" in r.getMessage()]
+        assert len(warned) == len(names)
+
+
+class TestPhaseBudgetEndsThePhase:
+    """main.py's industry-phase budget arrives as _ScrapeTimeout; the
+    orchestrator must let it through instead of starting the next board."""
+
+    def test_phase_timeout_is_not_swallowed(self):
+        from job_agent import scraper_industry_html as ih
+        from job_agent.main import _ScrapeTimeout
+
+        names = ["scrape_showbizjobs", "scrape_podnews", "scrape_mbw", "scrape_doorsopen",
+                 "scrape_digilogue", "scrape_remotegamejobs", "scrape_willhire", "scrape_apmg",
+                 "scrape_productionhub", "scrape_hitmarker", "scrape_builtin"]
+        patches = [patch.object(ih, n, return_value=[]) for n in names]
+        patches.append(patch.object(ih, "scrape_mbw", side_effect=_ScrapeTimeout("Industry phase timed out")))
+        later = patch.object(ih, "scrape_doorsopen", return_value=[])
+        for p_ in patches:
+            p_.start()
+        mock_later = later.start()
+        try:
+            with pytest.raises(_ScrapeTimeout):
+                ih.scrape_industry_html_boards(KEYWORDS)
+            mock_later.assert_not_called()
+        finally:
+            later.stop()
+            for p_ in patches:
+                p_.stop()
+
+
+class TestProductionHubStealthFetch:
+    """ProductionHub (and MBW) sit behind a Cloudflare Turnstile. The fetch
+    must solve it, wait for the real page, and refuse a challenge page."""
+
+    CHALLENGE = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body></body></html>"
+    REAL = """<html><head><title>Film &amp; Video Production Jobs</title></head><body>
+      <div class="media"><div class="media-body"><div class="media-header">
+        <h5 class="media-title"><a href="/job/90001/writer-video-producer">Writer &amp; Video Producer</a></h5>
+      </div></div></div></body></html>"""
+
+    def _fake_scrapling(self, body, status=200):
+        import types
+        page = MagicMock(body=body, status=status)
+        fetcher = MagicMock()
+        fetcher.fetch.return_value = page
+        return types.SimpleNamespace(StealthyFetcher=fetcher), fetcher
+
+    def test_solves_and_waits_for_selector(self):
+        import sys
+        from job_agent.scraper_productionhub import _fetch_stealth
+
+        mod, fetcher = self._fake_scrapling(self.REAL)
+        with patch.dict(sys.modules, {"scrapling": mod}):
+            soup = _fetch_stealth("https://www.productionhub.com/jobs", wait_selector="h5.media-title")
+
+        assert soup is not None and soup.select_one("h5.media-title a")
+        kwargs = fetcher.fetch.call_args.kwargs
+        assert kwargs["solve_cloudflare"] is True
+        assert kwargs["wait_selector"] == "h5.media-title"
+
+    def test_challenge_page_is_none(self, caplog):
+        import sys
+        from job_agent.scraper_productionhub import _fetch_stealth
+
+        mod, _ = self._fake_scrapling(self.CHALLENGE, status=403)
+        with patch.dict(sys.modules, {"scrapling": mod}):
+            with caplog.at_level("WARNING"):
+                assert _fetch_stealth("https://www.productionhub.com/jobs") is None
+        assert any("blocked by Cloudflare" in r.getMessage() for r in caplog.records)
+
+    def test_real_page_with_stale_403_status_is_kept(self):
+        # Scrapling can report the challenge's 403 status for the page it
+        # landed on after solving; the body decides.
+        import sys
+        from job_agent.scraper_productionhub import _fetch_stealth
+
+        mod, _ = self._fake_scrapling(self.REAL, status=403)
+        with patch.dict(sys.modules, {"scrapling": mod}):
+            assert _fetch_stealth("https://www.productionhub.com/jobs") is not None
+
+    def test_a_hung_solver_is_abandoned(self, caplog, monkeypatch):
+        """Scrapling's solver can loop forever on a challenge that never
+        clears; the fetch gives up after STEALTH_FETCH_TIMEOUT_S."""
+        import sys
+        import threading
+        import time
+        import types
+        from job_agent import scraper_productionhub as ph
+
+        release = threading.Event()
+
+        def hang(url, **kw):
+            release.wait(5)
+            return MagicMock(body=self.REAL, status=200)
+
+        monkeypatch.setattr(ph, "STEALTH_FETCH_TIMEOUT_S", 0.2)
+        mod = types.SimpleNamespace(StealthyFetcher=MagicMock(fetch=hang))
+        try:
+            with patch.dict(sys.modules, {"scrapling": mod}):
+                with caplog.at_level("WARNING"):
+                    started = time.monotonic()
+                    assert ph._fetch_stealth("https://www.productionhub.com/jobs") is None
+                    assert time.monotonic() - started < 2
+        finally:
+            release.set()
+        assert any("abandoned" in r.getMessage() for r in caplog.records)
+
+    def test_an_error_inside_the_fetch_is_a_warning(self, caplog):
+        import sys
+        import types
+        from job_agent.scraper_productionhub import _fetch_stealth
+
+        mod = types.SimpleNamespace(StealthyFetcher=MagicMock(fetch=MagicMock(side_effect=RuntimeError("boom"))))
+        with patch.dict(sys.modules, {"scrapling": mod}):
+            with caplog.at_level("WARNING"):
+                assert _fetch_stealth("https://www.productionhub.com/jobs") is None
+        assert any("boom" in r.getMessage() for r in caplog.records)
+
+    def test_doorsopen_style_fetch_skips_solver(self):
+        import sys
+        from job_agent.scraper_productionhub import _fetch_stealth
+
+        mod, fetcher = self._fake_scrapling(self.REAL)
+        with patch.dict(sys.modules, {"scrapling": mod}):
+            _fetch_stealth("https://www.doorsopen.co/jobs/", solve_cloudflare=False)
+        assert "solve_cloudflare" not in fetcher.fetch.call_args.kwargs
+
+    @patch("job_agent.scraper_productionhub._fetch_stealth")
+    def test_scraper_waits_for_job_cards(self, mock_fetch):
+        from job_agent.scraper_productionhub import scrape_productionhub
+
+        mock_fetch.return_value = None
+        assert scrape_productionhub(KEYWORDS) == []
+        mock_fetch.assert_called_once_with("https://www.productionhub.com/jobs", wait_selector="h5.media-title")

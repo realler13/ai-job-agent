@@ -318,6 +318,68 @@ class TestScrapeWorkday:
         # Should only appear once despite matching both keywords
         assert len(results) == 1
 
+    @staticmethod
+    def _one_page_session(mock_session_cls):
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
+        list_resp = MagicMock()
+        list_resp.json.return_value = {
+            "jobPostings": [{
+                "title": "Content Producer",
+                "externalPath": "/job/Austin/Content-Producer_R-1",
+                "locationsText": "Austin, TX",
+                "postedOn": "Posted Today",
+            }],
+            "total": 1,
+        }
+        list_resp.raise_for_status.return_value = None
+        mock_session.post.return_value = list_resp
+        return mock_session
+
+    @patch("job_agent.scraper_workday.requests.Session")
+    def test_sends_named_user_agent(self, mock_session_cls):
+        """Workday's Cloudflare answers 429 to the python-requests default UA
+        (on every board), so the session must name itself."""
+        from job_agent.scraper_workday import scrape_workday
+
+        mock_session = self._one_page_session(mock_session_cls)
+        scrape_workday("https://disney.wd5.myworkdayjobs.com/disneycareer",
+                       "Disney", KEYWORDS, fetch_details=False)
+
+        headers = mock_session.headers.update.call_args[0][0]
+        assert headers["User-Agent"]
+        assert "python-requests" not in headers["User-Agent"]
+
+    @patch("job_agent.scraper_workday.requests.Session")
+    def test_token_query_becomes_applied_facets(self, mock_session_cls):
+        """A shared board (Omnicom's) is filtered to one agency by the facet in
+        the token's query string; the job link must not carry that query."""
+        from job_agent.scraper_workday import scrape_workday
+
+        mock_session = self._one_page_session(mock_session_cls)
+        results = scrape_workday(
+            "https://interpublic.wd5.myworkdayjobs.com/OMC?Agency_Facet=abc123",
+            "GSD&M", KEYWORDS, fetch_details=False,
+        )
+
+        url = mock_session.post.call_args[0][0]
+        payload = mock_session.post.call_args[1]["json"]
+        assert url == "https://interpublic.wd5.myworkdayjobs.com/wday/cxs/interpublic/OMC/jobs"
+        assert payload["appliedFacets"] == {"Agency_Facet": ["abc123"]}
+        assert results[0]["job_url"] == (
+            "https://interpublic.wd5.myworkdayjobs.com/OMC/job/Austin/Content-Producer_R-1"
+        )
+
+    @patch("job_agent.scraper_workday.requests.Session")
+    def test_plain_token_sends_no_facets(self, mock_session_cls):
+        from job_agent.scraper_workday import scrape_workday
+
+        mock_session = self._one_page_session(mock_session_cls)
+        scrape_workday("https://condenast.wd115.myworkdayjobs.com/CondeCareers",
+                       "Condé Nast", KEYWORDS, fetch_details=False)
+
+        assert "appliedFacets" not in mock_session.post.call_args[1]["json"]
+
 
 # ============================================================
 # Recruitee
@@ -828,11 +890,35 @@ class TestScrapeApple:
         "errors": None,
     }
 
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self):
+        # The scraper pauses between requests and backs off after a timeout.
+        with patch("job_agent.scraper_eightfold_apple.time.sleep") as sleep:
+            self.sleep = sleep
+            yield
+
     def _make_html(self, data=None):
         if data is None:
             data = self.HYDRATION_DATA
         escaped = json.dumps(json.dumps(data))  # double-encode for JS
         return f'<html><script>window.__staticRouterHydrationData = JSON.parse({escaped});</script></html>'
+
+    @staticmethod
+    def _days_ago(days=0):
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def _search_html(self, results):
+        return self._make_html({"loaderData": {"search": {"searchResults": results}}})
+
+    @staticmethod
+    def _resp(text="", payload=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = text
+        resp.json.return_value = payload if payload is not None else {}
+        resp.raise_for_status.return_value = None
+        return resp
 
     @patch("job_agent.scraper_eightfold_apple.requests.get")
     def test_parse_and_filter(self, mock_get):
@@ -877,6 +963,253 @@ class TestScrapeApple:
         results = _extract_apple_hydration(html)
         assert len(results) == 2
         assert results[0]["postingTitle"] == "Creative Producer"
+
+    def test_hydration_keeps_non_ascii_titles(self):
+        """unicode_escape read the UTF-8 bytes as Latin-1 and stored an en dash
+        in a title as mojibake ('Video Producer â...')."""
+        from job_agent.scraper_eightfold_apple import _extract_apple_hydration
+
+        title = "Video Producer – Example Team for Music & Podcasts"
+        payload = json.dumps({"loaderData": {"search": {"searchResults": [{"postingTitle": title}]}}},
+                             ensure_ascii=False)
+        escaped = json.dumps(payload, ensure_ascii=False)[1:-1]
+        html = f'<script>window.__staticRouterHydrationData = JSON.parse("{escaped}");</script>'
+        assert _extract_apple_hydration(html)[0]["postingTitle"] == title
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_one_row_per_posting_with_its_locations(self, mock_get):
+        """Apple lists a posting once per location (id '<positionId>-<loc>');
+        it is one job, so one row, every city, one detail read."""
+        from job_agent.scraper_eightfold_apple import scrape_apple
+
+        fresh = self._days_ago(1)
+        rows = [
+            {"id": "200600009-0101", "positionId": "200600009", "postingTitle": "Creative Producer",
+             "jobSummary": "s", "postDateInGMT": fresh,
+             "locations": [{"city": "", "name": "Austin", "countryName": "United States of America"}]},
+            {"id": "200600009-0102", "positionId": "200600009", "postingTitle": "Creative Producer",
+             "jobSummary": "s", "postDateInGMT": fresh,
+             "locations": [{"city": "", "name": "Seattle", "countryName": "United States of America"}]},
+        ]
+        search_html = self._search_html(rows)
+
+        def get(url, params=None, **kw):
+            if "/api/v1/jobDetails/" in url:
+                return self._resp(payload={"res": {"postingTitle": "Creative Producer",
+                                                   "highJobTitle": "Producer IC3"}})
+            return self._resp(search_html if params["page"] == 1 else "<html></html>")
+        mock_get.side_effect = get
+
+        jobs = scrape_apple("en-us", "Apple", KEYWORDS)
+
+        assert len(jobs) == 1
+        assert jobs[0]["location"] == ("Austin, United States of America; "
+                                       "Seattle, United States of America")
+        assert jobs[0]["link"] == "https://jobs.apple.com/en-us/details/200600009"
+        assert jobs[0]["job_level"] == "Producer IC3"
+        detail_calls = [c for c in mock_get.call_args_list if "/api/v1/jobDetails/" in c.args[0]]
+        assert len(detail_calls) == 1
+        search_call = next(c for c in mock_get.call_args_list if "/search" in c.args[0])
+        assert search_call.kwargs["params"]["location"] == "united-states-USA"
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_timeout_is_retried_after_a_wait(self, mock_get):
+        import requests as _requests
+        from job_agent.scraper_eightfold_apple import scrape_apple
+
+        search_html = self._search_html([{
+            "id": "1-1", "positionId": "1", "postingTitle": "Creative Producer",
+            "postDateInGMT": self._days_ago(), "locations": []}])
+        answers = iter([_requests.ReadTimeout("read timed out"), self._resp(search_html)])
+
+        def get(url, params=None, **kw):
+            if "/search" in url and params["search"] == "producer" and params["page"] == 1:
+                answer = next(answers)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+            if "/api/v1/jobDetails/" in url:
+                return self._resp(payload={"res": {"postingTitle": "Creative Producer"}})
+            return self._resp("<html></html>")
+        mock_get.side_effect = get
+
+        jobs = scrape_apple("en-us", "Apple", KEYWORDS)
+
+        assert [j["title"] for j in jobs] == ["Creative Producer"]
+        assert 5 in [c.args[0] for c in self.sleep.call_args_list]   # the backoff wait
+        assert mock_get.call_args.kwargs["timeout"][1] > 15          # read timeout raised
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_stops_when_apple_does_not_answer(self, mock_get):
+        """When every seed's page 1 times out: two requests that fail after
+        all their retries end the Apple scrape for the run."""
+        import requests as _requests
+        from job_agent.scraper_eightfold_apple import scrape_apple
+
+        mock_get.side_effect = _requests.ReadTimeout("read timed out")
+        jobs = scrape_apple("en-us", "Apple", KEYWORDS)
+
+        assert jobs == []
+        assert mock_get.call_count == 2 * 3   # 2 requests x (1 try + 2 retries)
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_a_404_does_not_stop_the_scrape(self, mock_get):
+        import requests as _requests
+        from job_agent.scraper_eightfold_apple import scrape_apple
+
+        def get(url, params=None, **kw):
+            if "/search" in url:
+                if params["search"] in ("producer", "production"):
+                    resp = self._resp()
+                    resp.raise_for_status.side_effect = _requests.HTTPError(
+                        response=MagicMock(status_code=404))
+                    return resp
+                if params["search"] == "content" and params["page"] == 1:
+                    return self._resp(self._search_html([{
+                        "id": "9-1", "positionId": "9", "postingTitle": "Video Producer",
+                        "postDateInGMT": self._days_ago(), "locations": []}]))
+            if "/api/v1/jobDetails/" in url:
+                return self._resp(payload={"res": {"postingTitle": "Video Producer"}})
+            return self._resp("<html></html>")
+        mock_get.side_effect = get
+
+        jobs = scrape_apple("en-us", "Apple", KEYWORDS)
+        assert [j["title"] for j in jobs] == ["Video Producer"]
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_stale_postings_end_paging_and_skip_the_detail_read(self, mock_get):
+        """The search is newest first, and the pre-filter drops anything older
+        than STALE_POSTING_DAYS whatever its level, so neither later pages nor
+        that posting's job page are worth a request."""
+        from job_agent.scraper_eightfold_apple import scrape_apple
+
+        old = self._search_html([{
+            "id": "5-1", "positionId": "5", "postingTitle": "Creative Producer",
+            "jobSummary": "s", "postDateInGMT": self._days_ago(60), "locations": []}])
+        mock_get.side_effect = lambda url, params=None, **kw: self._resp(old)
+
+        jobs = scrape_apple("en-us", "Apple", KEYWORDS)
+
+        assert len(jobs) == 1 and jobs[0]["job_level"] == ""   # still returned, as before
+        urls = [c.args[0] for c in mock_get.call_args_list]
+        assert not [u for u in urls if "jobDetails" in u or "/details/" in u]
+        pages = [c.kwargs["params"]["page"] for c in mock_get.call_args_list]
+        assert pages == [1, 1, 1, 1]          # one page per seed
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_a_page_of_postings_seen_under_another_seed_does_not_end_paging(self, mock_get):
+        """The seeds overlap ('producer' / 'production'): a page holding only
+        postings already seen must not end that seed's paging."""
+        from job_agent.scraper_eightfold_apple import scrape_apple
+
+        def row(pid, title):
+            return {"id": f"{pid}-1", "positionId": pid, "postingTitle": title,
+                    "postDateInGMT": self._days_ago(), "locations": []}
+
+        pages = {("producer", 1): [row("1", "Creative Producer")],
+                 ("production", 1): [row("1", "Creative Producer")],
+                 ("production", 2): [row("2", "Video Producer")]}
+
+        def get(url, params=None, **kw):
+            if "/api/v1/jobDetails/" in url:
+                return self._resp(payload={"res": {"postingTitle": "x"}})
+            found = pages.get((params["search"], params["page"]))
+            return self._resp(self._search_html(found) if found else "<html></html>")
+        mock_get.side_effect = get
+
+        jobs = scrape_apple("en-us", "Apple", KEYWORDS)
+        assert sorted(j["title"] for j in jobs) == ["Creative Producer", "Video Producer"]
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_time_budget_ends_the_scrape(self, mock_get):
+        from job_agent import scraper_eightfold_apple as ap
+
+        clock = iter(range(0, 10_000, 200))   # each look at the clock: +200s
+        mock_get.side_effect = lambda url, params=None, **kw: self._resp(self._search_html([{
+            "id": f"{params['search']}-{params['page']}",
+            "positionId": f"{params['search']}{params['page']}",
+            "postingTitle": "Creative Producer", "postDateInGMT": self._days_ago(), "locations": []}]))
+        with patch.object(ap.time, "monotonic", lambda: next(clock)):
+            ap.scrape_apple("en-us", "Apple", KEYWORDS)
+        assert mock_get.call_count < 4
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_search_leaves_half_the_budget_for_the_job_reads(self, mock_get):
+        """Apple slow but answering: each search page takes 40s. Paging used
+        to spend the whole 300s, and every row came back without level and
+        pay. It now stops past 150s, and the job reads still happen."""
+        from job_agent import scraper_eightfold_apple as ap
+
+        now = [0.0]
+
+        def get(url, params=None, **kw):
+            if "/api/v1/jobDetails/" in url:
+                now[0] += 3
+                return self._resp(payload={"res": {"postingTitle": "x",
+                                                   "highJobTitle": "Producer IC3"}})
+            now[0] += 40
+            pid = f"{params['search']}{params['page']}"
+            return self._resp(self._search_html([{
+                "id": f"{pid}-1", "positionId": pid, "postingTitle": "Creative Producer",
+                "postDateInGMT": self._days_ago(), "locations": []}]))
+        mock_get.side_effect = get
+
+        with patch.object(ap.time, "monotonic", lambda: now[0]):
+            jobs = ap.scrape_apple("en-us", "Apple", KEYWORDS)
+
+        search_calls = [c for c in mock_get.call_args_list if "/search" in c.args[0]]
+        assert len(search_calls) == 4          # pages at 0, 40, 80, 120s; none after 150s
+        assert len(jobs) == 4
+        assert all(j["job_level"] == "Producer IC3" for j in jobs)
+
+    @patch("job_agent.scraper_eightfold_apple.requests.get")
+    def test_job_reads_go_newest_first_before_the_cap(self, mock_get):
+        from job_agent import scraper_eightfold_apple as ap
+
+        rows = [{"id": f"{pid}-1", "positionId": pid, "postingTitle": "Creative Producer",
+                 "postDateInGMT": self._days_ago(days), "locations": []}
+                for pid, days in (("old", 5), ("newest", 0), ("middle", 2))]
+        search_html = self._search_html(rows)
+
+        def get(url, params=None, **kw):
+            if "/api/v1/jobDetails/" in url:
+                return self._resp(payload={"res": {"postingTitle": "x",
+                                                   "highJobTitle": "Producer IC3"}})
+            return self._resp(search_html if params["page"] == 1 else "<html></html>")
+        mock_get.side_effect = get
+
+        with patch.object(ap, "_APPLE_MAX_DETAILS", 2):
+            jobs = ap.scrape_apple("en-us", "Apple", KEYWORDS)
+
+        read = [c.args[0].rsplit("/", 1)[1] for c in mock_get.call_args_list
+                if "/api/v1/jobDetails/" in c.args[0]]
+        assert read == ["newest", "middle"]
+        levels = {j["link"].rsplit("/", 1)[1]: j["job_level"] for j in jobs}
+        assert levels == {"old": "", "newest": "Producer IC3", "middle": "Producer IC3"}
+
+    def test_hydration_with_a_quote_then_paren_in_a_posting(self):
+        """'(.+?)")' stopped at the first '")' inside a posting text and the
+        page parsed to 0 rows, silently."""
+        from job_agent.scraper_eightfold_apple import _extract_apple_hydration
+
+        data = json.loads(json.dumps(self.HYDRATION_DATA))
+        summary = 'Produce shows for the "Studio") and more (see "Notes")'
+        data["loaderData"]["search"]["searchResults"][0]["jobSummary"] = summary
+        html = self._make_html(data) + '<script>JSON.parse("{}")</script>'
+        results = _extract_apple_hydration(html)
+        assert len(results) == 2
+        assert results[0]["jobSummary"] == summary
+        assert results[1]["postingTitle"] == "Data Scientist"
+
+    def test_hydration_with_odd_entries_keeps_the_good_ones(self):
+        from job_agent import scraper_eightfold_apple as ap
+
+        html = self._search_html(["oops", None, {
+            "id": "7-1", "positionId": "7", "postingTitle": "Creative Producer",
+            "postDateInGMT": self._days_ago(60), "locations": ["Austin", None]}])
+        with patch.object(ap.requests, "get", return_value=self._resp(html)):
+            jobs = ap.scrape_apple("en-us", "Apple", KEYWORDS)
+        assert [j["title"] for j in jobs] == ["Creative Producer"]
 
 
 # ============================================================

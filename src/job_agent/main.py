@@ -19,12 +19,13 @@ load_dotenv()
 
 from jobspy import scrape_jobs
 from .config import KEYWORDS, SEARCH_SITES, SITE_MIN_GAP_SEC, ALLOWED_LOCATIONS, EXCLUDE_PHRASES, KEYWORD_TO_CATEGORY, AUTO_GENERATE_CV_CL, AUTO_SEND_EMAIL, EMAIL_RECIPIENTS, REMOTE_SECOND_PASS, REMOTE_PASS_SITES, REMOTE_PASS_KEYWORDS, BROWSER_SCRAPE_KEYWORDS, SECONDARY_SECOND_PASS, SECONDARY_PASS_LOCATION, SECONDARY_PASS_KEYWORDS_EXTRA, DEFAULT_GENERATION_MODEL
+from .config import SITE_BREAKER_TRIP
 from .candidate_profile import SEARCH
 from .utils import (setup_logging, load_proxies,
                     company_tokens, location_key, dedup_scraped_jobs)
 
 from .gpt_filter import load_profile_text, batch_job_relevance_check
-from .postprocess import send_email_with_results, upload_to_google_sheets, send_error_alert
+from .postprocess import send_email_with_results, send_error_alert
 from .db_manager import DBManager
 from .session import SessionManager
 
@@ -291,10 +292,135 @@ EXPORT_COLUMNS = [
 ]
 
 
+class _SiteBreaker:
+    """Per-run circuit breaker for one jobspy site (LinkedIn).
+
+    LinkedIn throttles logged-out clients on some runs: searches hang to the
+    120 s limit or come back empty, and the LinkedIn loop can run for hours
+    for almost nothing while the digest waits. After `trip_after` bad
+    searches IN A ROW (timed out, or zero results) the breaker opens and the
+    site's searches are skipped. A good search resets the count, so a
+    slow-but-working day (scattered timeouts between good results) never
+    trips it. One instance is shared by the primary, remote and secondary
+    passes.
+
+    Recovery: LinkedIn sometimes comes back after a long bad streak and then
+    returns good searches for the rest of the run. An open breaker therefore
+    lets ONE probe search through at the start of each later pass and after
+    every `probe_every` skipped searches within a pass. A good probe closes it
+    (count reset); a bad probe keeps it open. A dead day costs at most a few
+    probes of 120 s each.
+
+    A lock guards the state, so it stays correct if a site's searches ever run
+    in more than one worker thread.
+    """
+
+    def __init__(self, site: str, trip_after: int, probe_every: int = 10):
+        self.site = site
+        self.trip_after = max(1, int(trip_after))
+        self.probe_every = max(1, int(probe_every))
+        self._lock = threading.Lock()
+        self._streak = 0
+        self.tripped = False        # open right now
+        self.tripped_at = ""        # "label/'keyword'" of the search that first opened it
+        self.skipped: dict = {}     # pass label -> searches skipped
+        self.trips = 0
+        self.recoveries = 0
+        self.probes = 0
+        self._label = None          # pass seen by the last allow()
+        self._since_probe = 0       # skips in this pass since the trip / last probe
+        self._skipped_open = 0      # skips since this opening (for the recovery line)
+        self.recovered_after = 0    # skips before the last recovery
+        self._probing = False
+        self._reported = False
+
+    def allow(self, label: str) -> bool:
+        """True if the next search may run (normal, or a probe of an open
+        breaker); counts it as skipped otherwise."""
+        with self._lock:
+            new_pass = label != self._label
+            if new_pass:
+                self._label = label
+                self._since_probe = 0
+            if not self.tripped:
+                return True
+            if self._probing:
+                pass                        # one probe at a time
+            elif new_pass or self._since_probe >= self.probe_every:
+                self._since_probe = 0
+                self._probing = True
+                self.probes += 1
+                return True
+            self.skipped[label] = self.skipped.get(label, 0) + 1
+            self._since_probe += 1
+            self._skipped_open += 1
+            return False
+
+    def record(self, ok: bool, where: str = ""):
+        """Record one finished search. Returns "tripped" on the call that opens
+        the breaker, "recovered" on the good probe that closes it, else None."""
+        with self._lock:
+            if self.tripped:
+                if not self._probing:
+                    return None
+                self._probing = False
+                if not ok:
+                    return None             # bad probe: stays open
+                self.tripped = False
+                self._streak = 0
+                self.recoveries += 1
+                self.recovered_after = self._skipped_open
+                return "recovered"
+            if ok:
+                self._streak = 0
+                return None
+            self._streak += 1
+            if self._streak >= self.trip_after:
+                self.tripped = True
+                self.trips += 1
+                if not self.tripped_at:
+                    self.tripped_at = where
+                self._since_probe = 0
+                self._skipped_open = 0
+                return "tripped"
+            return None
+
+    def report(self, logger) -> None:
+        """The ONE summary line per run, logged after the site's last pass so
+        the counts are exact: a WARNING when the breaker tripped, one INFO
+        "not tripped" line otherwise. Both are meant to be read by a log
+        check: keep "<site> circuit breaker:", "tripped N time(s)", "N <site>
+        searches skipped", "N recovery" and "not tripped" in them."""
+        with self._lock:
+            if self._reported:
+                return
+            self._reported = True
+            if not self.trips:
+                logger.info(f"{self.site} circuit breaker: not tripped this run")
+                return
+            total = sum(self.skipped.values())
+            parts = ", ".join(f"{k} {v}" for k, v in self.skipped.items()) or "none"
+            state = "still open at the end" if self.tripped else "closed at the end"
+            trips, recoveries, probes = self.trips, self.recoveries, self.probes
+        logger.warning(
+            f"{self.site} circuit breaker: tripped {trips} time(s) after {self.trip_after} "
+            f"searches in a row timed out or returned nothing (first at {self.tripped_at}); "
+            f"{total} {self.site} searches skipped ({parts}); {probes} probe search(es), "
+            f"{recoveries} recovery(ies), {state}. The site was throttling these searches; "
+            f"the other sites and phases ran as usual."
+        )
+
+
+def _site_breakers() -> dict:
+    """Fresh breakers for one run (state must never carry across runs: the
+    FastAPI process runs many searches)."""
+    return {site: _SiteBreaker(site, n) for site, n in SITE_BREAKER_TRIP.items()}
+
+
 def _parallel_jobspy_pass(
     sites, keywords, kwargs_for, *,
     session, control_flags, progress_callback, db, all_jobs, limit,
-    label, base_pct, logger,
+    label, base_pct, logger, breakers=None,
 ):
     """Run jobspy sites CONCURRENTLY — one worker thread per site, each
     walking the keyword list sequentially for its own site.
@@ -310,6 +436,10 @@ def _parallel_jobspy_pass(
     Timeouts: workers are non-main threads, so _run_with_timeout transparently
     uses the daemon-thread fallback (SIGALRM is main-thread-only). DB writes
     are safe from workers (DBManager uses thread-local connections; WAL).
+
+    breakers: {site: _SiteBreaker} shared across the passes of one run. An
+    open breaker's skipped keywords cost no request and no pacing sleep (its
+    probes run as normal searches); the other sites' workers are untouched.
     """
     lock = threading.Lock()
     collected: list = []
@@ -317,12 +447,18 @@ def _parallel_jobspy_pass(
 
     def _worker(site: str):
         min_gap = SITE_MIN_GAP_SEC.get(site, 0)
+        breaker = (breakers or {}).get(site)
         last_start = 0.0
         for keyword in keywords:
             if hit_limit.is_set():
                 return
             if session.check_stop() or (control_flags and control_flags.get('stop')):
                 return
+            # Before the pause wait and the pacing sleep: a skipped search
+            # costs nothing. Silent here; the breaker logs one summary. A
+            # probe of an open breaker runs like any search (pacing included).
+            if breaker and not breaker.allow(label):
+                continue
             while control_flags and control_flags.get('pause'):
                 time.sleep(1)
             session.wait_if_paused()
@@ -347,6 +483,16 @@ def _parallel_jobspy_pass(
 
             # Heartbeat (the sequential loops used to run 70+ silent minutes)
             logger.info(f"jobspy[{label}] {site}/'{keyword}': {len(jobs)} jobs")
+
+            # Timeouts and errors leave jobs empty, so "bad" = nothing came back.
+            event = breaker.record(not jobs.empty, f"{label}/'{keyword}'") if breaker else None
+            if event == "tripped":
+                logger.info(
+                    f"jobspy[{label}] {site}: {breaker.trip_after} bad searches in a row "
+                    f"— skipping {site} (one probe search per pass and every "
+                    f"{breaker.probe_every} skips; summary after the last pass)")
+            elif event == "recovered":
+                logger.info(f"{site} recovered after {breaker.recovered_after} skipped searches")
 
             if not jobs.empty:
                 kw_cat = KEYWORD_TO_CATEGORY.get(keyword.lower(), "")
@@ -497,6 +643,10 @@ def run_search_session(
     scrape_glassdoor = "glassdoor" in site_list
     scrape_google = "google_jobs" in site_list
 
+    # One breaker per throttle-prone site, shared by the primary, remote and
+    # secondary passes.
+    breakers = _site_breakers()
+
     # === SCRAPING PHASE: fast jobspy sites (LinkedIn, Indeed) — PARALLEL per site ===
     # One worker thread per site walking the full keyword list (see
     # _parallel_jobspy_pass). Wall-clock ≈ slowest site instead of the sum —
@@ -518,6 +668,7 @@ def run_search_session(
             session=session, control_flags=control_flags,
             progress_callback=progress_callback, db=db, all_jobs=all_jobs,
             limit=limit, label="primary", base_pct=0.30, logger=logger,
+            breakers=breakers,
         )
         if session.check_stop() or (control_flags and control_flags.get('stop')):
             progress_callback("Search Stopped by User.", 1.0)
@@ -574,7 +725,16 @@ def run_search_session(
         from .glassdoor_crawler import scrape_glassdoor as _scrape_gd
         progress_callback("Glassdoor (crawl4ai)...", 0.60)
         _gd_fails = 0
-        for kw in BROWSER_SCRAPE_KEYWORDS:
+        # Glassdoor ignores a typed location; only its own city id narrows a
+        # search. With the home city's id in the profile
+        # (search.glassdoor_city_id) each keyword runs in two lanes: the home
+        # city, then nationwide — the lane that brings remote roles and roles
+        # in other metros. Without the id, nationwide only. The location
+        # pre-filter sorts the nationwide results.
+        from .glassdoor_crawler import search_locations as _gd_locations
+        _gd_searches = [(kw, loc) for kw in BROWSER_SCRAPE_KEYWORDS
+                        for loc in _gd_locations()]
+        for kw, gd_loc in _gd_searches:
             if session.check_stop() or (control_flags and control_flags.get('stop')):
                 break
             if limit and len(all_jobs) >= limit:
@@ -583,7 +743,7 @@ def run_search_session(
                 logger.warning("Glassdoor: 2 consecutive failures — skipping rest this run")
                 break
             try:
-                gdf = _scrape_gd(kw, PRIMARY_PASS_LOCATION, results_wanted=results_wanted_per_site)
+                gdf = _scrape_gd(kw, gd_loc, results_wanted=results_wanted_per_site)
             except Exception as e:
                 logger.warning(f"Glassdoor '{kw}' failed: {e}"); gdf = None
             if gdf is not None:
@@ -593,7 +753,8 @@ def run_search_session(
                     # Enrich descriptions by rendering each posting page (the
                     # search list ships description='' — without this most
                     # Glassdoor jobs hit Stage 2 with no text to judge).
-                    # enrich_jobs_with_crawl4ai has 30s/page + 300s/batch caps.
+                    # enrich_jobs_with_crawl4ai has 30s/page + 300s/batch caps and an
+                    # anti-bot circuit breaker (3 blocked pages in a row -> 30-min hold).
                     try:
                         recs = asyncio.run(enrich_jobs_with_crawl4ai(recs))
                     except Exception as e:
@@ -625,6 +786,7 @@ def run_search_session(
             session=session, control_flags=control_flags,
             progress_callback=progress_callback, db=db, all_jobs=all_jobs,
             limit=limit, label="remote", base_pct=0.62, logger=logger,
+            breakers=breakers,
         )
 
     # === SECONDARY-METRO PASS (the profile's secondary metro: its cities are in
@@ -645,7 +807,12 @@ def run_search_session(
             session=session, control_flags=control_flags,
             progress_callback=progress_callback, db=db, all_jobs=all_jobs,
             limit=limit, label="secondary", base_pct=0.63, logger=logger,
+            breakers=breakers,
         )
+
+    # After the last jobspy pass, so the skipped count is the whole run's.
+    for _b in breakers.values():
+        _b.report(logger)
 
     # === ATS BOARDS PHASE ===
     if scrape_ats:
@@ -653,16 +820,42 @@ def run_search_session(
         from .config import ATS_COMPANIES
 
         progress_callback("Scanning ATS boards (Greenhouse/Lever)...", 0.65)
-        try:
-            # db/run_id: full-list boards record which postings they still
-            # list (Phase 27c) — recording never changes the returned jobs.
-            ats_df = _run_with_timeout(
-                scrape_ats_boards, args=(ATS_COMPANIES, keywords_list, progress_callback),
-                kwargs={"db": db, "run_id": session.id},
-                timeout_sec=2400, label="ATS phase",
-            )
-        except _ScrapeTimeout as e:
-            logger.warning(f"⏱️ {e} — using partial/no ATS results"); ats_df = pd.DataFrame()
+        # Two calls, each under its own budget: Workday boards page through
+        # fuzzy server searches and can run long, and a timeout discards
+        # everything its call collected. Run on their own, a Workday overrun
+        # costs only Workday's results; Greenhouse, Lever, Ashby and the other
+        # full-list boards (a few minutes) are already kept. The two budgets
+        # add up to the single 2400 s the phase had before.
+        ats_passes = [
+            ("ATS phase (non-Workday boards)",
+             [c for c in ATS_COMPANIES if c.get("ats") != "workday"], 900),
+            ("ATS phase (Workday boards)",
+             [c for c in ATS_COMPANIES if c.get("ats") == "workday"], 1500),
+        ]
+        ats_frames = []
+        for ats_label, ats_boards, ats_budget in ats_passes:
+            if not ats_boards:
+                continue
+            if session.check_stop() or (control_flags and control_flags.get('stop')):
+                break
+            try:
+                # db/run_id: full-list boards record which postings they still
+                # list (Phase 27c) — recording never changes the returned jobs.
+                # deadline: the call stops starting boards 30 s before its
+                # budget ends and returns what it has; the SIGALRM, which
+                # discards everything, stays as the backstop.
+                part = _run_with_timeout(
+                    scrape_ats_boards, args=(ats_boards, keywords_list, progress_callback),
+                    kwargs={"db": db, "run_id": session.id,
+                            "deadline": time.monotonic() + ats_budget - 30},
+                    timeout_sec=ats_budget, label=ats_label,
+                )
+            except _ScrapeTimeout as e:
+                logger.warning(f"⏱️ {e} — no results from these {len(ats_boards)} boards")
+                part = None
+            if part is not None and not part.empty:
+                ats_frames.append(part)
+        ats_df = pd.concat(ats_frames, ignore_index=True) if ats_frames else pd.DataFrame()
         if not ats_df.empty:
             ats_records = ats_df.to_dict("records")
             all_jobs.extend(ats_records)
@@ -944,6 +1137,21 @@ def process_found_jobs(
 
         if progress_callback: progress_callback(f"Found {len(relevant_df)} relevant jobs!", 0.90 if not is_retry else 0.8)
 
+        # === Posting text for tiered jobs listed without it ===
+        # Glassdoor, ZipRecruiter, ShowbizJobs, Podnews and others list a job
+        # without its posting; read it now, before the documents and the digest
+        # (posting_text: another saved copy, then the posting page).
+        if not relevant_df.empty:
+            try:
+                from .posting_text import fill_tiered_jobs
+                fill_tiered_jobs(
+                    relevant_df, db, logger,
+                    should_stop=lambda: bool(control_flags and control_flags.get('stop')) or session.check_stop())
+            except Exception as e:
+                if type(e).__name__ == "_ScrapeTimeout":
+                    raise
+                logger.warning(f"Posting text lookup failed: {e}")
+
         # === Auto-enrich matched jobs with Perplexity intel + Opus salary advisor ===
         # STRONG tier only: enriching the recall-widened worth_a_look tier burned
         # 3 Perplexity + 1 Opus salary call per job on jobs the candidate may never open.
@@ -1140,8 +1348,8 @@ def process_found_jobs(
             os.makedirs("results", exist_ok=True)
             output_file = f"results/jobs_{timestamp}.csv"
 
-            # Post-process steps are INDEPENDENT failure domains: a CSV or
-            # Sheets failure must never cost the candidate the digest email (a shared
+            # Post-process steps are INDEPENDENT failure domains: a CSV
+            # failure must never cost the candidate the digest email (a shared
             # try-block was silently skipping it).
             available_export_cols = [c for c in EXPORT_COLUMNS if c in relevant_df.columns]
             try:
@@ -1150,16 +1358,11 @@ def process_found_jobs(
                 logger.warning(f"CSV export failed: {e}")
                 output_file = None  # digest tolerates a missing attachment
 
-            # Sheets sync is retired; the digest's CSV attachment covers the
-            # export need.
-            sheet_url = None
-
             try:
                 if send_email and target_email:
                     send_email_with_results(
                         output_file, target_email, relevant_df,
                         profile_text=profile_text,
-                        spreadsheet_url=sheet_url or "",
                         total_scraped=total_scraped,
                         cascade_stats=cascade_config.get("stats") if cascade_config else None,
                         db=db,

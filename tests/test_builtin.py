@@ -15,9 +15,13 @@ from job_agent.scraper_builtin import (
     location_hints,
     regions_from_sites,
     scrape_builtin,
-    _scrape_region,
+    _add_descriptions,
+    _job_id,
     _parse_card,
+    _parse_description,
     _parse_posting_age,
+    _parse_posting_page,
+    _scrape_region,
 )
 from tests.fixtures.persona import (
     BUILTIN_SITES,
@@ -184,6 +188,17 @@ class TestParsePostingAge:
         assert _parse_posting_age("") == ""
         assert _parse_posting_age("random text no date") == ""
 
+    # The live card wording has no "Posted" prefix; a pattern that requires
+    # it misses most rows.
+    @pytest.mark.parametrize("text,days", [
+        ("9 Days Ago", 9), ("An Hour Ago", 0), ("2 Hours Ago", 0), ("A Day Ago", 1),
+        ("One Month Ago", 30), ("2 Months Ago", 60), ("Reposted 17 Days Ago", 17),
+        ("Reposted An Hour Ago", 0),
+    ])
+    def test_prefixless_card_wording(self, text, days):
+        from datetime import datetime, timedelta
+        assert _parse_posting_age(text) == (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
 
 # --- _parse_card -----------------------------------------------------------
 
@@ -216,6 +231,32 @@ class TestParseCard:
         monkeypatch.setattr(scraper_builtin, "LOCATION_HINTS", ("Austin", "Remote", "Hybrid"))
         assert _parse_card(_card_with_location("Austin, TX"), SEATTLE)["location"] == "Austin"
         assert _parse_card(_card_with_location("Seattle, WA"), SEATTLE)["location"] == ""
+
+    def test_age_comes_from_its_own_span_not_the_snippet(self):
+        # Live card shape: the age has its own span; the description snippet
+        # can say "today" or "3 days ago" and must not date the job.
+        from datetime import datetime, timedelta
+        html = """
+        <div data-id="job-card">
+          <a data-id="company-title" href="/company/gullwing-pictures">Gullwing Pictures</a>
+          <h2><a data-id="job-card-title" href="/job/creative-producer/9000712">Creative Producer</a></h2>
+          <span x-show="!showSavedTag" class="fs-xs fw-bold">9 Days Ago</span>
+          <span>Hybrid</span><span>Seattle, WA, USA</span>
+          <div>Join today and ship campaigns 3 days ago planned.</div>
+        </div>"""
+        card = BeautifulSoup(html, "html.parser").select_one('div[data-id="job-card"]')
+        job = _parse_card(card, SEATTLE)
+        assert job["date_posted"] == (datetime.now() - timedelta(days=9)).strftime("%Y-%m-%d")
+
+    def test_snippet_word_alone_gives_no_date(self):
+        html = """
+        <div data-id="job-card">
+          <a data-id="company-title" href="/company/x">X</a>
+          <h2><a data-id="job-card-title" href="/job/producer/1">Producer</a></h2>
+          <div>Apply today to join the team.</div>
+        </div>"""
+        card = BeautifulSoup(html, "html.parser").select_one('div[data-id="job-card"]')
+        assert _parse_card(card, SEATTLE)["date_posted"] == ""
 
     def test_missing_title_returns_none(self):
         html = '<div data-id="job-card"><a data-id="company-title">X</a></div>'
@@ -265,8 +306,9 @@ class TestScrapeRegion:
 
 
 class TestScrapeBuiltin:
+    @patch("job_agent.scraper_builtin._add_descriptions")
     @patch("job_agent.scraper_builtin._scrape_region")
-    def test_merges_two_regions(self, mock_scrape, monkeypatch):
+    def test_merges_two_regions(self, mock_scrape, _mock_desc, monkeypatch):
         monkeypatch.setattr(scraper_builtin, "REGIONS", regions_from_sites([SEATTLE, NATIONAL]))
         seattle_job = {"title": "Producer Seattle", "company": "A", "location": "Seattle",
                        "job_url": f"{SEATTLE}/job/a/1",
@@ -287,15 +329,17 @@ class TestScrapeBuiltin:
         assert regions_called == {"seattle", "builtin"}
         assert mock_scrape.call_count == 2 * len(scraper_builtin.BUILTIN_SEARCH_SEEDS)
 
+    @patch("job_agent.scraper_builtin._add_descriptions")
     @patch("job_agent.scraper_builtin._scrape_region")
-    def test_fixture_profile_scrapes_its_site_only(self, mock_scrape):
+    def test_fixture_profile_scrapes_its_site_only(self, mock_scrape, _mock_desc):
         mock_scrape.return_value = []
         assert scrape_builtin(["producer"]) == []
         assert {c.args[0] for c in mock_scrape.call_args_list} == {"seattle"}
         assert mock_scrape.call_count == len(scraper_builtin.BUILTIN_SEARCH_SEEDS)
 
+    @patch("job_agent.scraper_builtin._add_descriptions")
     @patch("job_agent.scraper_builtin._scrape_region")
-    def test_dedupes_by_url(self, mock_scrape, monkeypatch):
+    def test_dedupes_by_url(self, mock_scrape, _mock_desc, monkeypatch):
         monkeypatch.setattr(scraper_builtin, "REGIONS", regions_from_sites([SEATTLE, NATIONAL]))
         # Same URL returned from both regions — should appear once
         dup_job = {"title": "Producer", "company": "X", "location": "Remote",
@@ -322,3 +366,172 @@ class TestScrapeBuiltin:
                    if r.name == "job_agent.scraper_builtin" and "builtin_sites" in r.getMessage()]
         assert len(skipped) == 1
         assert skipped[0].levelno == logging.INFO
+
+    @patch("job_agent.scraper_builtin.time.sleep", lambda _: None)
+    @patch("job_agent.scraper_builtin._session")
+    @patch("job_agent.scraper_builtin._scrape_region")
+    def test_returned_rows_carry_the_posting_text(self, mock_scrape, mock_session):
+        job = {"title": "Video Producer", "company": "Gullwing Pictures", "location": "Seattle",
+               "job_url": f"{SEATTLE}/job/video-producer/9000580",
+               "description": "", "date_posted": "", "site": "builtin", "department": ""}
+        mock_scrape.side_effect = lambda region, seed, kws, **_: [dict(job)] if region == "seattle" else []
+        mock_session.get.return_value = _resp(DETAIL_HTML)
+
+        jobs = scrape_builtin(["producer"])
+        assert len(jobs) == 1
+        assert jobs[0]["description"].startswith("About the role")
+        # Same keys as before: the text fills the existing field, nothing new.
+        assert set(jobs[0]) == set(job)
+        mock_session.get.assert_called_once_with(job["job_url"], timeout=15)
+
+
+# --- posting page text ------------------------------------------------------
+
+# A Built In posting page in its real shape (made-up content): the JobPosting
+# sits in an @graph, its description is HTML inside the JSON string.
+DETAIL_HTML = """
+<html><head>
+<script type="application/ld+json">
+  {"@context": "https://schema.org", "@graph": [
+    {"@type": "BreadcrumbList", "itemListElement": []},
+    {"@type": "JobPosting", "title": "Video Producer",
+     "description": "<p><strong>About the role</strong></p><p>Run multi-camera shoots &amp; cut the footage.</p><ul><li>Own the production rhythm</li></ul>",
+     "datePosted": "2026-03-19"}
+  ]}
+</script>
+</head><body>
+<div id="job-post-body-9000580"><p>About the role</p><p>Body copy</p></div>
+</body></html>
+"""
+
+BODY_ONLY_HTML = """
+<html><body>
+<script type="application/ld+json">{"@type": "Organization", "name": "Gullwing Pictures"}</script>
+<div id="job-post-body-1"><p>About the role</p><p>Run shoots.</p></div>
+</body></html>
+"""
+
+
+def _resp(text, status=200):
+    r = MagicMock()
+    r.text = text
+    r.status_code = status
+    r.raise_for_status = MagicMock()
+    return r
+
+
+def _job(job_id, base=SEATTLE):
+    return {"title": f"Producer {job_id}", "company": "C", "location": "",
+            "job_url": f"{base}/job/producer/{job_id}",
+            "description": "", "date_posted": "", "site": "builtin", "department": ""}
+
+
+class TestParseDescription:
+    def test_reads_jobposting_from_ld_json_graph(self):
+        text = _parse_description(DETAIL_HTML)
+        assert text == ("About the role\nRun multi-camera shoots & cut the footage.\n"
+                        "Own the production rhythm")
+
+    def test_falls_back_to_body_div(self):
+        assert _parse_description(BODY_ONLY_HTML) == "About the role\nRun shoots."
+
+    def test_entity_encoded_markup(self):
+        page = ('<script type="application/ld+json">{"@type": "JobPosting", '
+                '"description": "&lt;p&gt;Edit video&lt;/p&gt;"}</script>')
+        assert _parse_description(page) == "Edit video"
+
+    def test_bad_json_and_no_body_gives_empty(self):
+        page = '<script type="application/ld+json">{not json</script><p>nav</p>'
+        assert _parse_description(page) == ""
+
+    def test_page_gives_date_posted(self):
+        text, date = _parse_posting_page(DETAIL_HTML)
+        assert text.startswith("About the role")
+        assert date == "2026-03-19"
+
+    def test_date_without_description_and_iso_datetime(self):
+        page = ('<script type="application/ld+json">{"@type": "JobPosting", '
+                '"datePosted": "2026-03-13T07:40:39+00:00"}</script>'
+                '<div id="job-post-body-9"><p>Body</p></div>')
+        assert _parse_posting_page(page) == ("Body", "2026-03-13")
+
+    def test_no_date_gives_empty(self):
+        assert _parse_posting_page(BODY_ONLY_HTML)[1] == ""
+
+
+class TestJobId:
+    def test_trailing_id(self):
+        assert _job_id(f"{SEATTLE}/job/associate-producer/9000030") == 9000030
+
+    def test_no_id(self):
+        assert _job_id(f"{SEATTLE}/jobs") == 0
+
+
+@patch("job_agent.scraper_builtin.time.sleep", lambda _: None)
+class TestAddDescriptions:
+    @patch("job_agent.scraper_builtin._session")
+    def test_newest_ids_first_within_cap(self, mock_session):
+        mock_session.get.return_value = _resp(DETAIL_HTML)
+        jobs = [_job(100), _job(300), _job(200)]
+
+        assert _add_descriptions(jobs, cap=2) == 2
+        fetched = [c.args[0] for c in mock_session.get.call_args_list]
+        assert fetched == [jobs[1]["job_url"], jobs[2]["job_url"]]
+        assert jobs[0]["description"] == ""  # oldest, over the cap: list data only
+        assert jobs[1]["description"] and jobs[2]["description"]
+
+    @patch("job_agent.scraper_builtin._session")
+    def test_same_posting_on_two_sites_fetched_once(self, mock_session):
+        mock_session.get.return_value = _resp(DETAIL_HTML)
+        jobs = [_job(500, SEATTLE), _job(500, NATIONAL)]
+
+        assert _add_descriptions(jobs) == 2
+        assert mock_session.get.call_count == 1
+        assert jobs[0]["description"] == jobs[1]["description"] != ""
+
+    @patch("job_agent.scraper_builtin._session")
+    def test_persistent_429_stops_fetching(self, mock_session):
+        mock_session.get.return_value = _resp("", status=429)
+        jobs = [_job(i) for i in range(1, 6)]
+
+        assert _add_descriptions(jobs) == 0
+        # 3 retries on the first page, then no other page is tried.
+        assert mock_session.get.call_count == 3
+        assert all(j["description"] == "" for j in jobs)
+
+    @patch("job_agent.scraper_builtin._session")
+    def test_failures_in_a_row_stop_fetching(self, mock_session):
+        mock_session.get.side_effect = Exception("timed out")
+        jobs = [_job(i) for i in range(1, 11)]
+
+        assert _add_descriptions(jobs) == 0
+        assert mock_session.get.call_count == 3
+
+    @patch("job_agent.scraper_builtin._session")
+    def test_page_date_replaces_card_age(self, mock_session):
+        # The page's plain date beats the card's relative age; a page without
+        # one leaves the card's date alone.
+        mock_session.get.side_effect = [_resp(DETAIL_HTML), _resp(BODY_ONLY_HTML)]
+        jobs = [_job(2), _job(1)]
+        jobs[0]["date_posted"] = jobs[1]["date_posted"] = "2026-03-10"
+
+        _add_descriptions(jobs)
+        assert jobs[0]["date_posted"] == "2026-03-19"
+        assert jobs[1]["date_posted"] == "2026-03-10"
+
+    @patch("job_agent.scraper_builtin._session")
+    def test_same_posting_on_two_sites_shares_the_date(self, mock_session):
+        mock_session.get.return_value = _resp(DETAIL_HTML)
+        jobs = [_job(500, SEATTLE), _job(500, NATIONAL)]
+
+        _add_descriptions(jobs)
+        assert [j["date_posted"] for j in jobs] == ["2026-03-19", "2026-03-19"]
+
+    @patch("job_agent.scraper_builtin._session")
+    def test_one_bad_page_does_not_stop_the_rest(self, mock_session):
+        mock_session.get.side_effect = [Exception("404"), _resp(DETAIL_HTML), _resp(DETAIL_HTML)]
+        jobs = [_job(3), _job(2), _job(1)]
+
+        assert _add_descriptions(jobs) == 2
+        assert jobs[0]["description"] == ""
+        assert jobs[1]["description"] and jobs[2]["description"]

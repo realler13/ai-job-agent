@@ -4,6 +4,9 @@ ProductionHub (productionhub.com/jobs) scraper.
 ProductionHub is a crew/production job board with ~80 active listings. It's
 behind Cloudflare, so plain `requests` returns 403 — we use Scrapling's
 StealthyFetcher (Firefox + Camoufox stealth) like we do for ZipRecruiter.
+The stealth browser alone now mostly gets Cloudflare's "Just a moment..."
+page (403, zero jobs); it must solve the Turnstile challenge
+(`solve_cloudflare=True`, about 9 s a page).
 
 Page structure (verified April 2026 via live probe):
   div.media
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from datetime import datetime
 
 from bs4 import BeautifulSoup
@@ -37,24 +41,79 @@ BASE_URL = "https://www.productionhub.com"
 JOBS_URL = f"{BASE_URL}/jobs"
 
 
-def _fetch_stealth(url: str, timeout_ms: int = 60000) -> BeautifulSoup | None:
-    """Fetch via Scrapling StealthyFetcher (Firefox + Camoufox), return soup."""
+# Scrapling's Cloudflare solver waits for a non-interactive challenge in an
+# uncapped loop (one second per turn), and the industry phase's SIGALRM budget
+# cannot interrupt it: a run has hung for hours inside the same solver
+# (ZipRecruiter). So every stealth fetch runs in a daemon thread that is
+# abandoned after this many seconds. A solved page takes 10-30 s.
+STEALTH_FETCH_TIMEOUT_S = 120
+
+
+def _fetch_stealth(url: str, timeout_ms: int = 60000,
+                   solve_cloudflare: bool = True,
+                   wait_selector: str | None = None) -> BeautifulSoup | None:
+    """Fetch via Scrapling StealthyFetcher (Firefox + Camoufox), return soup.
+
+    wait_selector names an element of the real page. Scrapling reports the
+    Turnstile "solved" before Cloudflare has redirected to the page, and
+    without the wait most solves still returned the challenge; with it they
+    returned the jobs.
+
+    Returns None when the page is still Cloudflare's challenge after the
+    fetch: parsing the challenge page finds "0 cards", and the board would
+    look merely empty.
+    """
     try:
         from scrapling import StealthyFetcher
-        page = StealthyFetcher.fetch(
-            url,
-            headless=True,
-            block_images=True,
-            timeout=timeout_ms,
-        )
+    except Exception as e:
+        logger.warning(f"Stealth fetch failed for {url}: {e}")
+        return None
+    kwargs = dict(headless=True, timeout=timeout_ms)
+    if solve_cloudflare:
+        # The options ZipRecruiter solves Cloudflare with
+        kwargs.update(solve_cloudflare=True, network_idle=True, humanize=True)
+    else:
+        kwargs.update(block_images=True)
+    if wait_selector:
+        kwargs["wait_selector"] = wait_selector
+
+    result: dict = {}
+
+    def _fetch():
+        try:
+            result["page"] = StealthyFetcher.fetch(url, **kwargs)
+        except BaseException as e:  # noqa: BLE001 — reported below, in the caller's thread
+            result["error"] = e
+
+    # A daemon thread never blocks the process from exiting; an abandoned one
+    # (and its browser) lingers until the run ends. The join is outside any
+    # try: a phase timeout raised here must reach the industry orchestrator.
+    worker = threading.Thread(target=_fetch, daemon=True, name="stealth-fetch")
+    worker.start()
+    worker.join(timeout=STEALTH_FETCH_TIMEOUT_S)
+    if worker.is_alive():
+        logger.warning(f"Stealth fetch for {url} still running after {STEALTH_FETCH_TIMEOUT_S}s "
+                       f"(Cloudflare solver loop?) — abandoned")
+        return None
+    if "error" in result:
+        logger.warning(f"Stealth fetch failed for {url}: {result['error']}")
+        return None
+    try:
+        page = result.get("page")
         if not page:
             return None
         html = getattr(page, "body", "") or page.text
+        if isinstance(html, bytes):
+            html = html.decode("utf-8", "replace")
         if not html:
+            return None
+        status = getattr(page, "status", None)
+        if "<title>Just a moment" in html[:5000]:
+            logger.warning(f"Stealth fetch blocked by Cloudflare for {url} (status {status})")
             return None
         return BeautifulSoup(html, "html.parser")
     except Exception as e:
-        logger.warning(f"ProductionHub stealth fetch failed for {url}: {e}")
+        logger.warning(f"Stealth fetch failed for {url}: {e}")
         return None
 
 
@@ -146,7 +205,7 @@ def scrape_productionhub(keywords: list[str], max_pages: int = 3) -> list[dict]:
 
     for page_num in range(1, max_pages + 1):
         url = JOBS_URL if page_num == 1 else f"{JOBS_URL}?page={page_num}"
-        soup = _fetch_stealth(url)
+        soup = _fetch_stealth(url, wait_selector="h5.media-title")
         if soup is None:
             break
 

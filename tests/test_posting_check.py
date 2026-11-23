@@ -126,7 +126,7 @@ def no_llm(monkeypatch):
 def test_config_block_values():
     assert config.POSTING_CHECK_FULL_LIST_PLATFORMS == (
         "greenhouse", "lever", "ashby", "smartrecruiters", "recruitee", "workable",
-        "eightfold", "bamboohr", "comeet")
+        "eightfold", "bamboohr", "comeet", "phenom")
     assert config.POSTING_GONE_AFTER_FETCHES == 2
     assert config.POSTING_QUALITY_MODEL == "claude-sonnet-5"
     assert config.POSTING_QUALITY_EFFORT == "low"

@@ -58,7 +58,6 @@ class TestProcessFoundJobsAutoGeneratesDocs:
 
         monkeypatch.setattr("job_agent.main.batch_job_relevance_check", fake_batch_check)
         monkeypatch.setattr("job_agent.main.load_profile_text", lambda path: "Mock resume text")
-        monkeypatch.setattr("job_agent.main.upload_to_google_sheets", lambda df: None)
         monkeypatch.setattr("job_agent.main.AUTO_GENERATE_CV_CL", False)
 
         with patch("job_agent.docs_builder.save_documents_for_job") as mock_save_docs:
@@ -93,7 +92,6 @@ class TestProcessFoundJobsAutoGeneratesDocs:
 
         monkeypatch.setattr("job_agent.main.batch_job_relevance_check", fake_batch_check)
         monkeypatch.setattr("job_agent.main.load_profile_text", lambda path: "Mock resume text")
-        monkeypatch.setattr("job_agent.main.upload_to_google_sheets", lambda df: None)
         monkeypatch.setattr("job_agent.main.AUTO_GENERATE_CV_CL", True)
 
         # Mock save_documents_for_job to avoid actual LLM calls

@@ -521,6 +521,39 @@ def test_too_little_left_after_the_checks_ships_the_template(monkeypatch):
     assert audit2["state"] == "invalid" and audit2["template_used"] and not judge2.calls
 
 
+def test_thin_posting_ships_the_template_without_any_model_call(monkeypatch, caplog):
+    """thin=True (set by save_documents_for_job): no letter call, no judge
+    call, the templated letter, and the reason in the audit."""
+    calls, judge = [], FakeJudge()
+    monkeypatch.setattr("job_agent.docs_builder.generate_cover_letter_content",
+                        fake_generator(letter(filler("open", 6), filler("mid", 8)), calls))
+    monkeypatch.setattr("job_agent.docs_builder.grade_cover_letter_truth", judge)
+    job = {"title": "Producer", "company": "Acme, Inc.", "description": "Apply now."}
+    with caplog.at_level(logging.INFO):
+        out, audit = build_cover_letter("PROFILE", job, domain="producer_core", thin=True)
+    assert calls == [] and judge.calls == []
+    assert out == templated_letter(job, "producer_core", "Acme")
+    assert audit["state"] == "input_incomplete" and audit["template_used"] is True
+    assert audit["reason"] == "thin posting (10 chars after cleaning) — standard letter, no model call"
+    assert audit["posting_chars"] == 10 and audit["model_words"] == 0
+    assert audit["words"] == _letter_words(_letter_paragraphs(out)) > 0
+    # the intended path: said once at INFO, never as a warning
+    shipped = [r for r in caplog.records if "templated letter ships" in r.getMessage()]
+    assert [r.levelno for r in shipped] == [logging.INFO]
+
+
+def test_short_posting_alone_does_not_switch_the_template_on(monkeypatch):
+    """The caller decides what is thin; without thin=True a short posting is
+    still written by the model, as before."""
+    text = letter(["I produce weekly video series for brand teams."] + filler("open", 4),
+                  filler("mid", 8), "Thank you for your time and consideration.")
+    calls = []
+    out, audit, judge = run_build(monkeypatch, text, job={"title": "Producer", "company": "Acme",
+                                                          "description": "Apply now."})
+    assert audit["state"] == "ok" and audit["template_used"] is False and len(judge.calls) == 1
+    assert "I produce weekly video series for brand teams." in out
+
+
 def test_generation_failure_writes_no_letter(monkeypatch):
     out, audit, judge = run_build(monkeypatch, "")
     assert out is None and audit["state"] == "generation_failed"
@@ -837,6 +870,23 @@ def test_package_with_judge_down_ships_a_signed_template(tmp_path, monkeypatch):
     assert "I am writing to apply for the Producer role at Acme. " + docs_builder._TEMPLATE_OPENING in texts
     assert texts[-2:] == ["Sincerely,", NAME]
     assert quality["audit"]["cl"]["template_used"] and quality["audit"]["cl"]["signed"]
+
+
+@pytest.mark.parametrize("description", ["", None, "Producer needed. Apply now."])
+def test_package_with_a_thin_posting_ships_a_signed_template_unasked(tmp_path, monkeypatch, description):
+    text = letter(filler("open", 6), filler("mid", 8), "Thank you for your time.")
+    pkg = Package(tmp_path, monkeypatch, text)
+    cv_path, cl_path, _, _, quality = pkg.run({"id": 10, "title": "Producer", "company": "Acme, Inc.",
+                                               "description": description})
+    assert cv_path and cl_path
+    assert pkg.cl_calls == [] and pkg.judge.calls == []                    # no paid letter call
+    texts = doc_texts(Document(cl_path))
+    assert "I am writing to apply for the Producer role at Acme. " + docs_builder._TEMPLATE_OPENING in texts
+    assert texts[-2:] == ["Sincerely,", NAME] and sum(t == "Sincerely," for t in texts) == 1
+    cl = quality["audit"]["cl"]
+    assert cl["state"] == "input_incomplete" and cl["template_used"] and cl["signed"]
+    assert cl["reason"].startswith("thin posting (") and cl["company_display"] == "Acme"
+    assert quality["state"] == "input_incomplete" and quality["flag"] == "REVIEW_RECOMMENDED"
 
 
 def test_package_generation_failure_writes_no_placeholder(tmp_path, monkeypatch):

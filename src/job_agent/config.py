@@ -609,6 +609,21 @@ SITE_MIN_GAP_SEC = {
     "indeed": 10,
 }
 
+# Circuit breaker: after this many searches IN A ROW that time out or return
+# nothing, the run skips that site's searches (primary, remote and secondary
+# passes), except one probe search at the start of each later pass and after
+# every 10 skips; a good probe closes the breaker (main._SiteBreaker). A good
+# search resets the count.
+# LinkedIn 16: replayed over several weeks of run logs, the longest run of bad
+# searches on a run where LinkedIn still worked stayed below 16. A run where
+# LinkedIn is down for good still trips within about half an hour and saves
+# hours of waiting on timeouts for a few minutes of probes. The probes only
+# help when LinkedIn comes back while its passes are still running; when it
+# recovers after the run has moved on, those searches are lost.
+SITE_BREAKER_TRIP = {
+    "linkedin": 16,
+}
+
 SEARCH_SITES = ["linkedin", "indeed", "glassdoor", "zip_recruiter", "ats_boards", "industry_boards", "remote_boards", "reddit_jobs", "google_jobs"]
 
 # Keywords for the SLOW browser-based scrapers — ZipRecruiter (Scrapling
@@ -660,7 +675,10 @@ REMOTE_PASS_KEYWORDS = [
 
 # === Industry Board Config ===
 # ShowbizJobs category slugs for HTML scraping
-SHOWBIZJOBS_CATEGORIES = ["production-crew", "podcast", "post-production", "digital", "music"]
+# ShowbizJobs renamed two categories (the old "post-production" and "digital"
+# slugs answer 404); the current list is on showbizjobs.com/jobs.
+SHOWBIZJOBS_CATEGORIES = ["production-crew", "podcast", "editing-post-production",
+                          "streaming-content", "music"]
 
 # EntertainmentCareers.net RSS feed category IDs
 ENTERTAINMENTCAREERS_FEEDS = [
@@ -1284,7 +1302,6 @@ ATS_COMPANIES = [
     {"company": "Asana", "ats": "greenhouse", "token": "asana"},
     {"company": "Vercel", "ats": "greenhouse", "token": "vercel"},
     {"company": "Crunchyroll", "ats": "greenhouse", "token": "crunchyroll"},
-    {"company": "Webflow", "ats": "greenhouse", "token": "webflow"},
     {"company": "Airtable", "ats": "greenhouse", "token": "airtable"},
     {"company": "Nextdoor", "ats": "greenhouse", "token": "nextdoor"},
     {"company": "Kickstarter", "ats": "greenhouse", "token": "kickstarter"},
@@ -1324,10 +1341,9 @@ ATS_COMPANIES = [
     {"company": "Scopely", "ats": "greenhouse", "token": "scopely"},
     {"company": "Pocket Gems", "ats": "greenhouse", "token": "pocketgems"},
     {"company": "Zynga", "ats": "greenhouse", "token": "zyngacareers"},
-    {"company": "Manticore Games", "ats": "greenhouse", "token": "manticoregames"},
-    {"company": "Mythical Games", "ats": "greenhouse", "token": "mythicalgames"},
+    # Manticore Games (greenhouse:manticoregames) removed — board 404; careers page: "no positions", no ATS
+    # Mythical Games (greenhouse:mythicalgames) removed — board 404; jobs now on its own site, no supported ATS
     {"company": "Naughty Dog", "ats": "greenhouse", "token": "naughtydog"},
-    {"company": "Unity Technologies", "ats": "greenhouse", "token": "unity3d"},
     {"company": "AppLovin", "ats": "greenhouse", "token": "applovin"},
     # --- Ad Agencies & Creative ---
     {"company": "VaynerMedia", "ats": "greenhouse", "token": "vaynermedia"},
@@ -1335,7 +1351,6 @@ ATS_COMPANIES = [
     {"company": "WPP", "ats": "greenhouse", "token": "wpp"},
     {"company": "Ogilvy", "ats": "greenhouse", "token": "ogilvy"},
     {"company": "AKQA", "ats": "greenhouse", "token": "akqa"},
-    {"company": "GSD&M", "ats": "greenhouse", "token": "gsdm"},
     {"company": "Weber Shandwick", "ats": "greenhouse", "token": "webershandwick"},
     {"company": "Huge", "ats": "greenhouse", "token": "hugeinc"},
     {"company": "Wieden+Kennedy", "ats": "greenhouse", "token": "wk"},
@@ -1374,7 +1389,6 @@ ATS_COMPANIES = [
 
     # ==================== LEVER (api.lever.co) ====================
     {"company": "Spotify", "ats": "lever", "token": "spotify"},
-    {"company": "Plaid", "ats": "lever", "token": "plaid"},
     {"company": "Illumination", "ats": "lever", "token": "illumination"},
     {"company": "Skydance", "ats": "lever", "token": "skydance"},
     {"company": "Warner Music Group", "ats": "lever", "token": "wmg"},
@@ -1393,7 +1407,7 @@ ATS_COMPANIES = [
     {"company": "OpenAI", "ats": "ashby", "token": "openai"},
     {"company": "Notion", "ats": "ashby", "token": "notion"},
     {"company": "Ramp", "ats": "ashby", "token": "ramp"},
-    {"company": "Deel", "ats": "ashby", "token": "deel"},
+    # Deel (ashby:deel) removed — the Ashby board stays empty; Deel posts on its own ATS (jobs.deel.com)
     {"company": "Cursor", "ats": "ashby", "token": "cursor"},
     {"company": "Cohere", "ats": "ashby", "token": "cohere"},
     {"company": "Quora", "ats": "ashby", "token": "quora"},
@@ -1408,11 +1422,11 @@ ATS_COMPANIES = [
     {"company": "Gamma", "ats": "ashby", "token": "gamma"},
     {"company": "Pika Labs", "ats": "ashby", "token": "pika"},
     {"company": "Patreon", "ats": "ashby", "token": "patreon"},
+    {"company": "Webflow", "ats": "ashby", "token": "webflow"},
+    {"company": "Plaid", "ats": "ashby", "token": "plaid"},
 
     # ==================== SMARTRECRUITERS (api.smartrecruiters.com) ====================
     {"company": "Bosch", "ats": "smartrecruiters", "token": "BoschGroup"},
-    {"company": "Visa", "ats": "smartrecruiters", "token": "Visa"},
-    {"company": "Skechers", "ats": "smartrecruiters", "token": "Skechers1"},
     {"company": "Equinox", "ats": "smartrecruiters", "token": "Equinox"},
     {"company": "McDonald's", "ats": "smartrecruiters", "token": "McDonaldsCorporation"},
     {"company": "IKEA", "ats": "smartrecruiters", "token": "InterIKEAGroup"},
@@ -1425,11 +1439,14 @@ ATS_COMPANIES = [
     {"company": "Omnicom", "ats": "smartrecruiters", "token": "OmnicomGroup"},
     {"company": "ServiceNow", "ats": "smartrecruiters", "token": "ServiceNow"},
     {"company": "Sportradar", "ats": "smartrecruiters", "token": "Sportradar"},
+    {"company": "NBCUniversal", "ats": "smartrecruiters", "token": "NBCUniversal3"},
 
     # ==================== WORKDAY (*.myworkdayjobs.com POST API) ====================
-    {"company": "Disney", "ats": "workday", "token": "https://disney.wd5.myworkdayjobs.com/disneycareer"},
+    # Disney moved from Workday (disney.wd5/disneycareer: nearly empty, and its postings are also on Phenom) to its Phenom site
+    {"company": "Disney", "ats": "phenom", "token": "https://join.disneycareers.com/global/en"},
+    # Pixar (workday:https://pixar.wd501.myworkdayjobs.com/Pixar_External_Career_Site) not added — its postings are all on the Disney Phenom board above
     {"company": "Warner Bros. Discovery", "ats": "workday", "token": "https://warnerbros.wd5.myworkdayjobs.com/global"},
-    {"company": "Sony Pictures", "ats": "workday", "token": "https://sonyglobal.wd1.myworkdayjobs.com/SonyPicturesEntertainmentCareers"},
+    {"company": "Sony Pictures", "ats": "workday", "token": "https://spe.wd1.myworkdayjobs.com/SonyPicturesEntertainment"},
     # Walmart REMOVED 2026-07-18: Workday tenant returns HTTP 410 Gone
     # (permanently retired path) on consecutive runs.
     {"company": "Salesforce", "ats": "workday", "token": "https://salesforce.wd12.myworkdayjobs.com/External_Career_Site"},
@@ -1437,13 +1454,12 @@ ATS_COMPANIES = [
     {"company": "Target", "ats": "workday", "token": "https://target.wd5.myworkdayjobs.com/targetcareers"},
     {"company": "NVIDIA", "ats": "workday", "token": "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite"},
     {"company": "Intel", "ats": "workday", "token": "https://intel.wd1.myworkdayjobs.com/External"},
-    {"company": "Activision Blizzard", "ats": "workday", "token": "https://activision.wd1.myworkdayjobs.com/External"},
-    {"company": "NBCUniversal", "ats": "workday", "token": "https://comcast.wd5.myworkdayjobs.com/Comcast_Careers"},
+    {"company": "Activision Blizzard", "ats": "workday", "token": "https://xboxgaming.wd1.myworkdayjobs.com/External"},
     {"company": "Samsung", "ats": "workday", "token": "https://sec.wd3.myworkdayjobs.com/Samsung_Careers"},
     {"company": "Snap", "ats": "workday", "token": "https://snapchat.wd1.myworkdayjobs.com/snap"},
     {"company": "Nike", "ats": "workday", "token": "https://nike.wd1.myworkdayjobs.com/nke"},
     {"company": "Bloomberg Industry Group", "ats": "workday", "token": "https://bloomberg.wd1.myworkdayjobs.com/Bloombergindustrygroup_External_Career_Site"},
-    {"company": "Condé Nast", "ats": "workday", "token": "https://condenast.wd5.myworkdayjobs.com/CondeCareers"},
+    {"company": "Condé Nast", "ats": "workday", "token": "https://condenast.wd115.myworkdayjobs.com/CondeCareers"},
     {"company": "Fox TV Stations (East)", "ats": "workday", "token": "https://fox.wd1.myworkdayjobs.com/FOXTVST_EAST"},
     {"company": "Fox TV Stations (West)", "ats": "workday", "token": "https://fox.wd1.myworkdayjobs.com/FOXTVST_WEST"},
     {"company": "Tastemade (Wonder Group)", "ats": "workday", "token": "https://wonder.wd1.myworkdayjobs.com/WG"},
@@ -1451,6 +1467,11 @@ ATS_COMPANIES = [
     {"company": "Autodesk", "ats": "workday", "token": "https://autodesk.wd1.myworkdayjobs.com/Ext"},
     {"company": "Universal Music Group", "ats": "workday", "token": "https://umusic.wd5.myworkdayjobs.com/UMGUS"},
     {"company": "Wasserman", "ats": "workday", "token": "https://teamwass.wd5.myworkdayjobs.com/WassermanCareers"},
+    {"company": "Unity Technologies", "ats": "workday", "token": "https://unitytech.wd1.myworkdayjobs.com/Unity"},
+    {"company": "Visa", "ats": "workday", "token": "https://visa.wd5.myworkdayjobs.com/Visa"},
+    {"company": "Skechers", "ats": "workday", "token": "https://skechers.wd5.myworkdayjobs.com/One-career-site"},
+    # Omnicom's shared board, filtered to one agency (the facet id from its careers link)
+    {"company": "GSD&M", "ats": "workday", "token": "https://interpublic.wd5.myworkdayjobs.com/OMC?REC_-_CF_LRV_Recruiting_Agency__Job_Posting_Anchor__Extended=65f98a8defd81001e7fdfc832c610000"},
 
     # ==================== TEAMTAILOR (*.teamtailor.com HTML) ====================
     # Klarna + Paradox Interactive removed 2026-06-09 — both tokens 404
@@ -1496,8 +1517,8 @@ ATS_COMPANIES = [
     {"company": "NPR", "ats": "greenhouse", "token": "nationalpublicradioinc"},
     {"company": "Complex Networks", "ats": "lever", "token": "Complex"},
     {"company": "Goodby Silverstein & Partners", "ats": "greenhouse", "token": "goodbysilversteinpartners"},
-    {"company": "TBWA\\Chiat\\Day", "ats": "greenhouse", "token": "tbwachiatday"},
-    {"company": "Mekanism", "ats": "smartrecruiters", "token": "mekanism"},
+    {"company": "TBWA\\Chiat\\Day", "ats": "workday", "token": "https://interpublic.wd5.myworkdayjobs.com/OMC?REC_-_CF_LRV_Recruiting_Agency__Job_Posting_Anchor__Extended=65f98a8defd81001e7fe0b8660d40000"},
+    # Mekanism (smartrecruiters:mekanism) removed — the board stays empty; it hires by email, no ATS
 
     # ==================== Phase 17 — Widen-the-net source research ====================
     # 74 companies, all tokens LIVE-verified (HTTP 200 + >=1 posting) 2026-06-01 across
@@ -1513,7 +1534,7 @@ ATS_COMPANIES = [
     {"company": "Movers+Shakers", "ats": "greenhouse", "token": "moversshakers"},
     {"company": "Saylor Agency", "ats": "greenhouse", "token": "saylor"},
     {"company": "Hovercraft", "ats": "greenhouse", "token": "hovercraft"},
-    {"company": "143 Studios", "ats": "greenhouse", "token": "143studiosinc"},
+    # 143 Studios (greenhouse:143studiosinc) removed — board 404 and its domain no longer resolves
     {"company": "Whalar", "ats": "greenhouse", "token": "whalarinc"},
     {"company": "WPP Media (GroupM)", "ats": "greenhouse", "token": "wppmedia"},
     {"company": "Townsquare Media", "ats": "greenhouse", "token": "townsquaremedia"},
@@ -1527,18 +1548,18 @@ ATS_COMPANIES = [
     {"company": "Kapwing", "ats": "lever", "token": "kapwing"},
     {"company": "Rumble", "ats": "greenhouse", "token": "rumble"},
     {"company": "Teachable", "ats": "greenhouse", "token": "teachablecareers"},
-    {"company": "Thinkific", "ats": "greenhouse", "token": "thinkific"},
+    {"company": "Thinkific", "ats": "ashby", "token": "thinkific"},
     {"company": "Udemy", "ats": "greenhouse", "token": "udemy"},
     {"company": "Coursera", "ats": "greenhouse", "token": "coursera"},
     {"company": "Upwork", "ats": "greenhouse", "token": "upwork"},
-    {"company": "Whop", "ats": "greenhouse", "token": "whop"},
+    {"company": "Whop", "ats": "ashby", "token": "whop"},
     {"company": "Beehiiv", "ats": "bamboohr", "token": "beehiiv"},
     {"company": "Mux", "ats": "ashby", "token": "mux"},
     # --- Gaming studios (content) + DTC/e-commerce content studios ---
-    {"company": "Singularity6", "ats": "greenhouse", "token": "singularity6"},
+    {"company": "Singularity6", "ats": "greenhouse", "token": "singularitysix"},
     {"company": "Second Dinner", "ats": "ashby", "token": "seconddinner"},
     {"company": "Rothy's", "ats": "ashby", "token": "rothys"},
-    {"company": "Brooklinen", "ats": "greenhouse", "token": "brooklinen"},
+    {"company": "Brooklinen", "ats": "ashby", "token": "brooklinen"},
     {"company": "Faire", "ats": "greenhouse", "token": "faire"},
     {"company": "Thrive Market", "ats": "greenhouse", "token": "thrivemarket"},
     {"company": "Olipop", "ats": "greenhouse", "token": "olipop"},
@@ -1559,7 +1580,7 @@ ATS_COMPANIES = [
     {"company": "SoFi", "ats": "greenhouse", "token": "sofi"},
     {"company": "Oscar Health", "ats": "greenhouse", "token": "oscar"},
     {"company": "Oura", "ats": "greenhouse", "token": "oura"},
-    {"company": "Headway", "ats": "greenhouse", "token": "headway"},
+    {"company": "Headway", "ats": "ashby", "token": "headway"},
     {"company": "Ginkgo Bioworks", "ats": "greenhouse", "token": "ginkgobioworks"},
     # --- AI startups + well-funded outlets hiring content/video/brand producers ---
     {"company": "Harvey", "ats": "ashby", "token": "harvey"},
@@ -1567,7 +1588,7 @@ ATS_COMPANIES = [
     {"company": "Synthesia", "ats": "ashby", "token": "synthesia"},
     {"company": "Canva", "ats": "smartrecruiters", "token": "Canva"},
     {"company": "Cresta", "ats": "greenhouse", "token": "cresta"},
-    {"company": "Mistral AI", "ats": "lever", "token": "mistral"},
+    {"company": "Mistral AI", "ats": "ashby", "token": "mistral.ai"},
     {"company": "Abridge", "ats": "ashby", "token": "abridge"},
     {"company": "Glean", "ats": "greenhouse", "token": "gleanwork"},
     {"company": "Together AI", "ats": "greenhouse", "token": "togetherai"},
@@ -1602,9 +1623,11 @@ ATS_COMPANIES = [
 # === Phase 27c: "Is this posting real?" (facts, never a score) ===
 # ATS platforms whose per-company fetch returns the WHOLE board. Only these
 # record board fetches; workday/apple are seed keyword searches, teamtailor is
-# a paginated HTML page — absence there proves nothing.
+# a paginated HTML page — absence there proves nothing. Phenom reads the
+# whole board in two requests of 500.
 POSTING_CHECK_FULL_LIST_PLATFORMS = ("greenhouse", "lever", "ashby", "smartrecruiters",
-                                     "recruitee", "workable", "eightfold", "bamboohr", "comeet")
+                                     "recruitee", "workable", "eightfold", "bamboohr", "comeet",
+                                     "phenom")
 POSTING_GONE_AFTER_FETCHES = 2        # complete fetches in a row without the posting
 POSTING_FETCH_DROP_RATIO = 0.5        # a board shrinking below half of its previous ok fetch = no evidence once
 POSTING_GONE_MIN_SPAN_HOURS = 6       # the missing fetches must span this long (a search right after the pipeline is not a 2nd look)

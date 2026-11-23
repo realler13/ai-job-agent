@@ -26,18 +26,6 @@ class TestPostprocess:
         # Default should be None (optional)
         assert sig.parameters["db"].default is None
 
-    def test_upload_to_google_sheets_returns_none_without_creds(self, monkeypatch):
-        """upload_to_google_sheets returns None when no credentials."""
-        monkeypatch.setattr(
-            "job_agent.postprocess.get_google_credentials",
-            lambda: None
-        )
-        import pandas as pd
-        from job_agent.postprocess import upload_to_google_sheets
-
-        result = upload_to_google_sheets(pd.DataFrame({"a": [1]}))
-        assert result is None
-
 
 class TestMdToHtml:
     """Tests for _md_to_html markdown-to-HTML conversion."""

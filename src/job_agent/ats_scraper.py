@@ -2,6 +2,7 @@
 import logging
 import re
 import threading
+import time
 
 import pandas as pd
 import requests
@@ -291,12 +292,13 @@ def scrape_ats_boards(
     progress_callback=None,
     db=None,
     run_id=None,
+    deadline: float | None = None,
 ) -> pd.DataFrame:
     """
     Scrape all configured ATS boards.
 
     Supports: greenhouse, lever, ashby, smartrecruiters, workday,
-    recruitee, workable, teamtailor, eightfold, apple, bamboohr, comeet.
+    recruitee, workable, teamtailor, eightfold, apple, bamboohr, comeet, phenom.
 
     Args:
         companies: List of dicts with keys: company, ats, token
@@ -306,6 +308,10 @@ def scrape_ats_boards(
             report is recorded (Phase 27c "still listed?"). Recording never
             changes which jobs are returned.
         run_id: Session id stamped on the recorded fetches.
+        deadline: Optional time.monotonic() value. A board is started only
+            while one Workday board's time budget (plus 20 s) is left before
+            it; otherwise the scan stops and returns what it collected. The
+            caller's SIGALRM would throw all of it away.
 
     Returns:
         DataFrame of all matching jobs
@@ -314,13 +320,20 @@ def scrape_ats_boards(
     from .scraper_ashby_sr import scrape_ashby, scrape_smartrecruiters
     from .scraper_bamboohr_comeet import scrape_bamboohr, scrape_comeet
     from .scraper_eightfold_apple import scrape_apple, scrape_eightfold
+    from .scraper_phenom import scrape_phenom
     from .scraper_rwt import scrape_recruitee, scrape_teamtailor, scrape_workable
-    from .scraper_workday import scrape_workday
+    from .scraper_workday import _BOARD_TIME_BUDGET, scrape_workday
 
     all_jobs = []
     total = len(companies)
 
     for i, entry in enumerate(companies):
+        if deadline is not None and deadline - time.monotonic() < _BOARD_TIME_BUDGET + 20:
+            logger.warning(
+                f"ATS: time nearly up — {total - i} of {total} boards skipped this run "
+                f"(from {entry['company']}); keeping the {len(all_jobs)} jobs already found"
+            )
+            break
         company = entry["company"]
         ats = entry["ats"]
         token = entry["token"]
@@ -329,32 +342,46 @@ def scrape_ats_boards(
             progress_callback(f"ATS: Scanning {company} ({ats})...", i / max(total, 1))
 
         _clear_board_report()
-        if ats == "greenhouse":
-            jobs = scrape_greenhouse(token, company, keywords)
-        elif ats == "lever":
-            jobs = scrape_lever(token, company, keywords)
-        elif ats == "ashby":
-            jobs = scrape_ashby(token, company, keywords)
-        elif ats == "smartrecruiters":
-            jobs = scrape_smartrecruiters(token, company, keywords)
-        elif ats == "workday":
-            jobs = scrape_workday(token, company, keywords)
-        elif ats == "recruitee":
-            jobs = scrape_recruitee(token, company, keywords)
-        elif ats == "workable":
-            jobs = scrape_workable(token, company, keywords)
-        elif ats == "teamtailor":
-            jobs = scrape_teamtailor(token, company, keywords)
-        elif ats == "eightfold":
-            jobs = scrape_eightfold(token, company, keywords)
-        elif ats == "apple":
-            jobs = scrape_apple(token, company, keywords)
-        elif ats == "bamboohr":
-            jobs = scrape_bamboohr(token, company, keywords)
-        elif ats == "comeet":
-            jobs = scrape_comeet(token, company, keywords)
-        else:
-            logger.warning(f"Unknown ATS type '{ats}' for {company}, skipping")
+        try:
+            if ats == "greenhouse":
+                jobs = scrape_greenhouse(token, company, keywords)
+            elif ats == "lever":
+                jobs = scrape_lever(token, company, keywords)
+            elif ats == "ashby":
+                jobs = scrape_ashby(token, company, keywords)
+            elif ats == "smartrecruiters":
+                jobs = scrape_smartrecruiters(token, company, keywords)
+            elif ats == "workday":
+                jobs = scrape_workday(token, company, keywords)
+            elif ats == "recruitee":
+                jobs = scrape_recruitee(token, company, keywords)
+            elif ats == "workable":
+                jobs = scrape_workable(token, company, keywords)
+            elif ats == "teamtailor":
+                jobs = scrape_teamtailor(token, company, keywords)
+            elif ats == "eightfold":
+                jobs = scrape_eightfold(token, company, keywords)
+            elif ats == "apple":
+                jobs = scrape_apple(token, company, keywords)
+            elif ats == "bamboohr":
+                jobs = scrape_bamboohr(token, company, keywords)
+            elif ats == "comeet":
+                jobs = scrape_comeet(token, company, keywords)
+            elif ats == "phenom":
+                jobs = scrape_phenom(token, company, keywords)
+            else:
+                logger.warning(f"Unknown ATS type '{ats}' for {company}, skipping")
+                continue
+        except Exception as e:
+            # One broken board (a malformed posting, an unexpected API shape)
+            # must not stop every board after it. The pipeline's phase budget
+            # (main._ScrapeTimeout, raised by SIGALRM) still has to end the
+            # phase, so it passes through.
+            if type(e).__name__ == "_ScrapeTimeout":
+                raise
+            logger.warning(f"ATS board {company} ({ats}) failed, skipping: "
+                           f"{type(e).__name__}: {e}")
+            _clear_board_report()  # a half-finished fetch is not a board list
             continue
 
         if db is not None:
